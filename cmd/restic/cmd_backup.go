@@ -255,10 +255,13 @@ func readBackupFromStdin(opts BackupOptions, gopts GlobalOptions, args []string)
 		return err
 	}
 
-	lock, err := lockRepo(repo)
-	defer unlockRepo(lock)
-	if err != nil {
-		return err
+	if !gopts.NoLock {
+		Warnf("WARNING: No lock file is being created, this may lead to data loss on concurrent prune operations!\n")
+		lock, err := lockRepo(repo)
+		defer unlockRepo(lock)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = repo.LoadIndex(gopts.ctx)
@@ -393,10 +396,13 @@ func runBackup(opts BackupOptions, gopts GlobalOptions, args []string) error {
 		return err
 	}
 
-	lock, err := lockRepo(repo)
-	defer unlockRepo(lock)
-	if err != nil {
-		return err
+	if !gopts.NoLock {
+		Warnf("WARNING: No lock file is being created, this may lead to data loss on concurrent prune operations!\n")
+		lock, err := lockRepo(repo)
+		defer unlockRepo(lock)
+		if err != nil {
+			return err
+		}
 	}
 
 	// exclude restic cache
