@@ -463,13 +463,18 @@ func runBackup(opts BackupOptions, gopts GlobalOptions, term *termstatus.Termina
 
 	t.Go(func() error { return p.Run(t.Context(gopts.ctx)) })
 
-	if !gopts.JSON {
-		p.V("lock repository")
-	}
-	lock, err := lockRepo(repo)
-	defer unlockRepo(lock)
-	if err != nil {
-		return err
+	if !gopts.NoLock {
+		if !gopts.JSON {
+			p.V("lock repository")
+		}
+		lock, err := lockRepo(repo)
+		defer unlockRepo(lock)
+		if err != nil {
+			return err
+		}
+	} else {
+		p.V("NOT locking repository as requested")
+		Warnf("WARNING: No lock file is being created, this may lead to data loss on parallel prune operations!\n")
 	}
 
 	// rejectByNameFuncs collect functions that can reject items from the backup based on path only
