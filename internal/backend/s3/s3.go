@@ -14,8 +14,8 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/restic"
 
-	"github.com/minio/minio-go"
-	"github.com/minio/minio-go/pkg/credentials"
+	"github.com/minio/minio-go/v6"
+	"github.com/minio/minio-go/v6/pkg/credentials"
 
 	"github.com/restic/restic/internal/debug"
 )
@@ -40,13 +40,15 @@ func open(cfg Config, rt http.RoundTripper) (*Backend, error) {
 		minio.MaxRetry = int(cfg.MaxRetries)
 	}
 
-	// Chains all credential types, starting with
-	// Static credentials provided by user.
-	// IAM profile based credentials. (performs an HTTP
-	// call to a pre-defined endpoint, only valid inside
-	// configured ec2 instances)
-	// AWS env variables such as AWS_ACCESS_KEY_ID
-	// Minio env variables such as MINIO_ACCESS_KEY
+	// Chains all credential types, in the following order:
+	// 	- Static credentials provided by user
+	//	- AWS env vars (i.e. AWS_ACCESS_KEY_ID)
+	//  - Minio env vars (i.e. MINIO_ACCESS_KEY)
+	//  - AWS creds file (i.e. AWS_SHARED_CREDENTIALS_FILE or ~/.aws/credentials)
+	//  - Minio creds file (i.e. MINIO_SHARED_CREDENTIALS_FILE or ~/.mc/config.json)
+	//  - IAM profile based credentials. (performs an HTTP
+	//    call to a pre-defined endpoint, only valid inside
+	//    configured ec2 instances)
 	creds := credentials.NewChainCredentials([]credentials.Provider{
 		&credentials.EnvAWS{},
 		&credentials.Static{
@@ -55,14 +57,16 @@ func open(cfg Config, rt http.RoundTripper) (*Backend, error) {
 				SecretAccessKey: cfg.Secret,
 			},
 		},
+		&credentials.EnvMinio{},
+		&credentials.FileAWSCredentials{},
+		&credentials.FileMinioClient{},
 		&credentials.IAM{
 			Client: &http.Client{
 				Transport: http.DefaultTransport,
 			},
 		},
-		&credentials.EnvMinio{},
 	})
-	client, err := minio.NewWithCredentials(cfg.Endpoint, creds, !cfg.UseHTTP, "")
+	client, err := minio.NewWithCredentials(cfg.Endpoint, creds, !cfg.UseHTTP, cfg.Region)
 	if err != nil {
 		return nil, errors.Wrap(err, "minio.NewWithCredentials")
 	}
@@ -184,6 +188,10 @@ func (be *Backend) ReadDir(dir string) (list []os.FileInfo, err error) {
 	defer close(done)
 
 	for obj := range be.client.ListObjects(be.cfg.Bucket, dir, false, done) {
+		if obj.Err != nil {
+			return nil, err
+		}
+
 		if obj.Key == "" {
 			continue
 		}
@@ -223,22 +231,6 @@ func (be *Backend) Path() string {
 	return be.cfg.Prefix
 }
 
-// lenForFile returns the length of the file.
-func lenForFile(f *os.File) (int64, error) {
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, errors.Wrap(err, "Stat")
-	}
-
-	pos, err := f.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, errors.Wrap(err, "Seek")
-	}
-
-	size := fi.Size() - pos
-	return size, nil
-}
-
 // Save stores data in the backend at the handle.
 func (be *Backend) Save(ctx context.Context, h restic.Handle, rd restic.RewindReader) error {
 	debug.Log("Save %v", h)
@@ -252,7 +244,7 @@ func (be *Backend) Save(ctx context.Context, h restic.Handle, rd restic.RewindRe
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	opts := minio.PutObjectOptions{}
+	opts := minio.PutObjectOptions{StorageClass: be.cfg.StorageClass}
 	opts.ContentType = "application/octet-stream"
 
 	debug.Log("PutObject(%v, %v, %v)", be.cfg.Bucket, objName, rd.Length())
@@ -313,7 +305,7 @@ func (be *Backend) openReader(ctx context.Context, h restic.Handle, length int, 
 
 	be.sem.GetToken()
 	coreClient := minio.Core{Client: be.client}
-	rd, err := coreClient.GetObjectWithContext(ctx, be.cfg.Bucket, objName, opts)
+	rd, _, _, err := coreClient.GetObjectWithContext(ctx, be.cfg.Bucket, objName, opts)
 	if err != nil {
 		be.sem.ReleaseToken()
 		return nil, err
@@ -420,6 +412,10 @@ func (be *Backend) List(ctx context.Context, t restic.FileType, fn func(restic.F
 	listresp := be.client.ListObjects(be.cfg.Bucket, prefix, recursive, ctx.Done())
 
 	for obj := range listresp {
+		if obj.Err != nil {
+			return obj.Err
+		}
+
 		m := strings.TrimPrefix(obj.Key, prefix)
 		if m == "" {
 			continue

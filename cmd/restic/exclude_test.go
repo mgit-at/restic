@@ -27,7 +27,34 @@ func TestRejectByPattern(t *testing.T) {
 	for _, tc := range tests {
 		t.Run("", func(t *testing.T) {
 			reject := rejectByPattern(patterns)
-			res := reject(tc.filename, nil)
+			res := reject(tc.filename)
+			if res != tc.reject {
+				t.Fatalf("wrong result for filename %v: want %v, got %v",
+					tc.filename, tc.reject, res)
+			}
+		})
+	}
+}
+
+func TestRejectByInsensitivePattern(t *testing.T) {
+	var tests = []struct {
+		filename string
+		reject   bool
+	}{
+		{filename: "/home/user/foo.GO", reject: true},
+		{filename: "/home/user/foo.c", reject: false},
+		{filename: "/home/user/foobar", reject: false},
+		{filename: "/home/user/FOObar/x", reject: true},
+		{filename: "/home/user/README", reject: false},
+		{filename: "/home/user/readme.md", reject: true},
+	}
+
+	patterns := []string{"*.go", "README.md", "/home/user/foobar/*"}
+
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
+			reject := rejectByInsensitivePattern(patterns)
+			res := reject(tc.filename)
 			if res != tc.reject {
 				t.Fatalf("wrong result for filename %v: want %v, got %v",
 					tc.filename, tc.reject, res)
@@ -140,8 +167,8 @@ func TestMultipleIsExcludedByFile(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		excludedByFoo := fooExclude(p, fi)
-		excludedByBar := barExclude(p, fi)
+		excludedByFoo := fooExclude(p)
+		excludedByBar := barExclude(p)
 		excluded := excludedByFoo || excludedByBar
 		// the log message helps debugging in case the test fails
 		t.Logf("%q: %v || %v = %v", p, excludedByFoo, excludedByBar, excluded)

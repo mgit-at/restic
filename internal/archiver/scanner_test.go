@@ -96,7 +96,7 @@ func TestScanner(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			sc := NewScanner(fs.Track{fs.Local{}})
+			sc := NewScanner(fs.Track{FS: fs.Local{}})
 			if test.selFn != nil {
 				sc.Select = test.selFn
 			}
@@ -237,7 +237,7 @@ func TestScannerError(t *testing.T) {
 				test.prepare(t)
 			}
 
-			sc := NewScanner(fs.Track{fs.Local{}})
+			sc := NewScanner(fs.Track{FS: fs.Local{}})
 			if test.selFn != nil {
 				sc.Select = test.selFn
 			}
@@ -289,7 +289,7 @@ func TestScannerCancel(t *testing.T) {
 		"other": TestFile{Content: "other"},
 	}
 
-	result := ScanStats{Files: 2, Bytes: 6}
+	result := ScanStats{Files: 2, Dirs: 1, Bytes: 6}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -307,7 +307,7 @@ func TestScannerCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sc := NewScanner(fs.Track{fs.Local{}})
+	sc := NewScanner(fs.Track{FS: fs.Local{}})
 	var lastStats ScanStats
 	sc.Result = func(item string, s ScanStats) {
 		lastStats = s
@@ -319,12 +319,8 @@ func TestScannerCancel(t *testing.T) {
 	}
 
 	err = sc.Scan(ctx, []string{"."})
-	if err == nil {
-		t.Errorf("did not find expected error")
-	}
-
-	if err != context.Canceled {
-		t.Errorf("unexpected error found, want %v, got %v", context.Canceled, err)
+	if err != nil {
+		t.Errorf("unexpected error %v found", err)
 	}
 
 	if lastStats != result {

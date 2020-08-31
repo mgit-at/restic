@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"io/ioutil"
 	"os"
 	"strings"
@@ -10,6 +10,7 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
+	"github.com/restic/restic/internal/ui/table"
 
 	"github.com/spf13/cobra"
 )
@@ -35,10 +36,16 @@ func init() {
 	flags.StringVarP(&newPasswordFile, "new-password-file", "", "", "the file from which to load a new password")
 }
 
-func listKeys(ctx context.Context, s *repository.Repository) error {
-	tab := NewTable()
-	tab.Header = fmt.Sprintf(" %-10s  %-10s  %-10s  %s", "ID", "User", "Host", "Created")
-	tab.RowFormat = "%s%-10s  %-10s  %-10s  %s"
+func listKeys(ctx context.Context, s *repository.Repository, gopts GlobalOptions) error {
+	type keyInfo struct {
+		Current  bool   `json:"current"`
+		ID       string `json:"id"`
+		UserName string `json:"userName"`
+		HostName string `json:"hostName"`
+		Created  string `json:"created"`
+	}
+
+	var keys []keyInfo
 
 	err := s.List(ctx, restic.KeyFile, func(id restic.ID, size int64) error {
 		k, err := repository.LoadKey(ctx, s, id.String())
@@ -47,18 +54,34 @@ func listKeys(ctx context.Context, s *repository.Repository) error {
 			return nil
 		}
 
-		var current string
-		if id.String() == s.KeyName() {
-			current = "*"
-		} else {
-			current = " "
+		key := keyInfo{
+			Current:  id.String() == s.KeyName(),
+			ID:       id.Str(),
+			UserName: k.Username,
+			HostName: k.Hostname,
+			Created:  k.Created.Local().Format(TimeFormat),
 		}
-		tab.Rows = append(tab.Rows, []interface{}{current, id.Str(),
-			k.Username, k.Hostname, k.Created.Format(TimeFormat)})
+
+		keys = append(keys, key)
 		return nil
 	})
+
 	if err != nil {
 		return err
+	}
+
+	if gopts.JSON {
+		return json.NewEncoder(globalOptions.stdout).Encode(keys)
+	}
+
+	tab := table.New()
+	tab.AddColumn(" ID", "{{if .Current}}*{{else}} {{end}}{{ .ID }}")
+	tab.AddColumn("User", "{{ .UserName }}")
+	tab.AddColumn("Host", "{{ .HostName }}")
+	tab.AddColumn("Created", "{{ .Created }}")
+
+	for _, key := range keys {
+		tab.AddRow(key)
 	}
 
 	return tab.Write(globalOptions.stdout)
@@ -160,7 +183,7 @@ func runKey(gopts GlobalOptions, args []string) error {
 			return err
 		}
 
-		return listKeys(ctx, repo)
+		return listKeys(ctx, repo, gopts)
 	case "add":
 		lock, err := lockRepo(repo)
 		defer unlockRepo(lock)

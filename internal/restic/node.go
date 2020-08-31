@@ -134,8 +134,8 @@ func (node Node) GetExtendedAttribute(a string) []byte {
 	return nil
 }
 
-// CreateAt creates the node at the given path and restores all the meta data.
-func (node *Node) CreateAt(ctx context.Context, path string, repo Repository, idx *HardlinkIndex) error {
+// CreateAt creates the node at the given path but does NOT restore node meta data.
+func (node *Node) CreateAt(ctx context.Context, path string, repo Repository) error {
 	debug.Log("create node %v at %v", node.Name, path)
 
 	switch node.Type {
@@ -144,7 +144,7 @@ func (node *Node) CreateAt(ctx context.Context, path string, repo Repository, id
 			return err
 		}
 	case "file":
-		if err := node.createFileAt(ctx, path, repo, idx); err != nil {
+		if err := node.createFileAt(ctx, path, repo); err != nil {
 			return err
 		}
 	case "symlink":
@@ -169,6 +169,11 @@ func (node *Node) CreateAt(ctx context.Context, path string, repo Repository, id
 		return errors.Errorf("filetype %q not implemented!\n", node.Type)
 	}
 
+	return nil
+}
+
+// RestoreMetadata restores node metadata
+func (node Node) RestoreMetadata(path string) error {
 	err := node.restoreMetadata(path)
 	if err != nil {
 		debug.Log("restoreMetadata(%s) error %v", path, err)
@@ -181,7 +186,16 @@ func (node Node) restoreMetadata(path string) error {
 	var firsterr error
 
 	if err := lchown(path, int(node.UID), int(node.GID)); err != nil {
-		firsterr = errors.Wrap(err, "Lchown")
+		// Like "cp -a" and "rsync -a" do, we only report lchown permission errors
+		// if we run as root.
+		// On Windows, Geteuid always returns -1, and we always report lchown
+		// permission errors.
+		if os.Geteuid() > 0 && os.IsPermission(err) {
+			debug.Log("not running as root, ignoring lchown permission error for %v: %v",
+				path, err)
+		} else {
+			firsterr = errors.Wrap(err, "Lchown")
+		}
 	}
 
 	if node.Type != "symlink" {
@@ -192,12 +206,10 @@ func (node Node) restoreMetadata(path string) error {
 		}
 	}
 
-	if node.Type != "dir" {
-		if err := node.RestoreTimestamps(path); err != nil {
-			debug.Log("error restoring timestamps for dir %v: %v", path, err)
-			if firsterr != nil {
-				firsterr = err
-			}
+	if err := node.RestoreTimestamps(path); err != nil {
+		debug.Log("error restoring timestamps for dir %v: %v", path, err)
+		if firsterr != nil {
+			firsterr = err
 		}
 	}
 
@@ -247,18 +259,7 @@ func (node Node) createDirAt(path string) error {
 	return nil
 }
 
-func (node Node) createFileAt(ctx context.Context, path string, repo Repository, idx *HardlinkIndex) error {
-	if node.Links > 1 && idx.Has(node.Inode, node.DeviceID) {
-		if err := fs.Remove(path); !os.IsNotExist(err) {
-			return errors.Wrap(err, "RemoveCreateHardlink")
-		}
-		err := fs.Link(idx.GetFilename(node.Inode, node.DeviceID), path)
-		if err != nil {
-			return errors.Wrap(err, "CreateHardlink")
-		}
-		return nil
-	}
-
+func (node Node) createFileAt(ctx context.Context, path string, repo Repository) error {
 	f, err := fs.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return errors.Wrap(err, "OpenFile")
@@ -273,10 +274,6 @@ func (node Node) createFileAt(ctx context.Context, path string, repo Repository,
 
 	if closeErr != nil {
 		return errors.Wrap(closeErr, "Close")
-	}
-
-	if node.Links > 1 {
-		idx.Add(node.Inode, node.DeviceID, path)
 	}
 
 	return nil
@@ -324,35 +321,38 @@ func (node Node) createSymlinkAt(path string) error {
 }
 
 func (node *Node) createDevAt(path string) error {
-	return mknod(path, syscall.S_IFBLK|0600, int(node.Device))
+	return mknod(path, syscall.S_IFBLK|0600, node.device())
 }
 
 func (node *Node) createCharDevAt(path string) error {
-	return mknod(path, syscall.S_IFCHR|0600, int(node.Device))
+	return mknod(path, syscall.S_IFCHR|0600, node.device())
 }
 
 func (node *Node) createFifoAt(path string) error {
 	return mkfifo(path, 0600)
 }
 
+// FixTime returns a time.Time which can safely be used to marshal as JSON. If
+// the timestamp is ealier that year zero, the year is set to zero. In the same
+// way, if the year is larger than 9999, the year is set to 9999. Other than
+// the year nothing is changed.
+func FixTime(t time.Time) time.Time {
+	switch {
+	case t.Year() < 0000:
+		return t.AddDate(-t.Year(), 0, 0)
+	case t.Year() > 9999:
+		return t.AddDate(-(t.Year() - 9999), 0, 0)
+	default:
+		return t
+	}
+}
+
 func (node Node) MarshalJSON() ([]byte, error) {
-	if node.ModTime.Year() < 0 || node.ModTime.Year() > 9999 {
-		err := errors.Errorf("node %v has invalid ModTime year %d: %v",
-			node.Path, node.ModTime.Year(), node.ModTime)
-		return nil, err
-	}
-
-	if node.ChangeTime.Year() < 0 || node.ChangeTime.Year() > 9999 {
-		err := errors.Errorf("node %v has invalid ChangeTime year %d: %v",
-			node.Path, node.ChangeTime.Year(), node.ChangeTime)
-		return nil, err
-	}
-
-	if node.AccessTime.Year() < 0 || node.AccessTime.Year() > 9999 {
-		err := errors.Errorf("node %v has invalid AccessTime year %d: %v",
-			node.Path, node.AccessTime.Year(), node.AccessTime)
-		return nil, err
-	}
+	// make sure invalid timestamps for mtime and atime are converted to
+	// something we can actually save.
+	node.ModTime = FixTime(node.ModTime)
+	node.AccessTime = FixTime(node.AccessTime)
+	node.ChangeTime = FixTime(node.ChangeTime)
 
 	type nodeJSON Node
 	nj := nodeJSON(node)
@@ -695,9 +695,4 @@ func (node *Node) fillTimes(stat statT) {
 	atim := stat.atim()
 	node.ChangeTime = time.Unix(ctim.Unix())
 	node.AccessTime = time.Unix(atim.Unix())
-}
-
-func changeTime(stat statT) time.Time {
-	ctim := stat.ctim()
-	return time.Unix(ctim.Unix())
 }

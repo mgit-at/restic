@@ -1,4 +1,4 @@
-// +build !windows,!darwin,!freebsd
+// +build !windows,!darwin,!freebsd,!netbsd
 
 package fs
 
@@ -30,6 +30,7 @@ func extendedStat(fi os.FileInfo) ExtendedFileInfo {
 
 		AccessTime: time.Unix(s.Atim.Unix()),
 		ModTime:    time.Unix(s.Mtim.Unix()),
+		ChangeTime: time.Unix(s.Ctim.Unix()),
 	}
 
 	return extFI

@@ -1,9 +1,15 @@
+// +build freebsd,go1.12
+
 package restic
 
 import "syscall"
 
 func (node Node) restoreSymlinkTimestamps(path string, utimes [2]syscall.Timespec) error {
 	return nil
+}
+
+func (node Node) device() uint64 {
+	return node.Device
 }
 
 func (s statUnix) atim() syscall.Timespec { return s.Atimespec }

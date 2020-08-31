@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/restic/restic/internal/cache"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
+	"github.com/restic/restic/internal/ui/table"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +30,7 @@ The "cache" command allows listing and cleaning local cache directories.
 type CacheOptions struct {
 	Cleanup bool
 	MaxAge  uint
+	NoSize  bool
 }
 
 var cacheOptions CacheOptions
@@ -38,6 +41,7 @@ func init() {
 	f := cmdCache.Flags()
 	f.BoolVar(&cacheOptions.Cleanup, "cleanup", false, "remove old cache directories")
 	f.UintVar(&cacheOptions.MaxAge, "max-age", 30, "max age in `days` for cache directories to be considered old")
+	f.BoolVar(&cacheOptions.NoSize, "no-size", false, "do not output the size of the cache directories")
 }
 
 func runCache(opts CacheOptions, gopts GlobalOptions, args []string) error {
@@ -85,9 +89,22 @@ func runCache(opts CacheOptions, gopts GlobalOptions, args []string) error {
 		return nil
 	}
 
-	tab := NewTable()
-	tab.Header = fmt.Sprintf("%-14s   %-16s %s", "Repository ID", "Last Used", "Old")
-	tab.RowFormat = "%-14s   %-16s %s"
+	tab := table.New()
+
+	type data struct {
+		ID   string
+		Last string
+		Old  string
+		Size string
+	}
+
+	tab.AddColumn("Repo ID", "{{ .ID }}")
+	tab.AddColumn("Last Used", "{{ .Last }}")
+	tab.AddColumn("Old", "{{ .Old }}")
+
+	if !opts.NoSize {
+		tab.AddColumn("Size", "{{ .Size }}")
+	}
 
 	dirs, err := cache.All(cachedir)
 	if err != nil {
@@ -109,14 +126,41 @@ func runCache(opts CacheOptions, gopts GlobalOptions, args []string) error {
 			old = "yes"
 		}
 
-		tab.Rows = append(tab.Rows, []interface{}{
+		var size string
+		if !opts.NoSize {
+			bytes, err := dirSize(filepath.Join(cachedir, entry.Name()))
+			if err != nil {
+				return err
+			}
+			size = fmt.Sprintf("%11s", formatBytes(uint64(bytes)))
+		}
+
+		tab.AddRow(data{
 			entry.Name()[:10],
 			fmt.Sprintf("%d days ago", uint(time.Since(entry.ModTime()).Hours()/24)),
 			old,
+			size,
 		})
 	}
 
 	tab.Write(gopts.stdout)
+	Printf("%d cache dirs in %s\n", len(dirs), cachedir)
 
 	return nil
+}
+
+func dirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			size += info.Size()
+		}
+
+		return nil
+	})
+	return size, err
 }

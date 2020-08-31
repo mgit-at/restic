@@ -19,11 +19,12 @@ import (
 type Cache struct {
 	Path             string
 	Base             string
+	Created          bool
 	PerformReadahead func(restic.Handle) bool
 }
 
 const dirMode = 0700
-const fileMode = 0600
+const fileMode = 0644
 
 func readVersion(dir string) (v uint, err error) {
 	buf, err := ioutil.ReadFile(filepath.Join(dir, "version"))
@@ -61,7 +62,13 @@ func writeCachedirTag(dir string) error {
 		return err
 	}
 
-	f, err := fs.OpenFile(filepath.Join(dir, "CACHEDIR.TAG"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	tagfile := filepath.Join(dir, "CACHEDIR.TAG")
+	_, err := fs.Lstat(tagfile)
+	if err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "Lstat")
+	}
+
+	f, err := fs.OpenFile(tagfile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fileMode)
 	if err != nil {
 		if os.IsExist(errors.Cause(err)) {
 			return nil
@@ -92,7 +99,7 @@ func New(id string, basedir string) (c *Cache, err error) {
 		}
 	}
 
-	err = mkdirCacheDir(basedir)
+	created, err := mkdirCacheDir(basedir)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +122,13 @@ func New(id string, basedir string) (c *Cache, err error) {
 	}
 
 	// create the repo cache dir if it does not exist yet
-	if err = fs.MkdirAll(cachedir, dirMode); err != nil {
-		return nil, err
+	_, err = fs.Lstat(cachedir)
+	if os.IsNotExist(err) {
+		err = fs.MkdirAll(cachedir, dirMode)
+		if err != nil {
+			return nil, err
+		}
+		created = true
 	}
 
 	// update the timestamp so that we can detect old cache dirs
@@ -126,7 +138,7 @@ func New(id string, basedir string) (c *Cache, err error) {
 	}
 
 	if v < cacheVersion {
-		err = ioutil.WriteFile(filepath.Join(cachedir, "version"), []byte(fmt.Sprintf("%d", cacheVersion)), 0644)
+		err = ioutil.WriteFile(filepath.Join(cachedir, "version"), []byte(fmt.Sprintf("%d", cacheVersion)), fileMode)
 		if err != nil {
 			return nil, errors.Wrap(err, "WriteFile")
 		}
@@ -139,8 +151,9 @@ func New(id string, basedir string) (c *Cache, err error) {
 	}
 
 	c = &Cache{
-		Path: cachedir,
-		Base: basedir,
+		Path:    cachedir,
+		Base:    basedir,
+		Created: created,
 		PerformReadahead: func(restic.Handle) bool {
 			// do not perform readahead by default
 			return false
@@ -162,11 +175,7 @@ const MaxCacheAge = 30 * 24 * time.Hour
 
 func validCacheDirName(s string) bool {
 	r := regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
-	if !r.MatchString(s) {
-		return false
-	}
-
-	return true
+	return r.MatchString(s)
 }
 
 // listCacheDirs returns the list of cache directories.

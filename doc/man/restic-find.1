@@ -5,21 +5,26 @@
 
 .SH NAME
 .PP
-restic\-find \- Find a file or directory
+restic\-find \- Find a file, a directory or restic IDs
 
 
 .SH SYNOPSIS
 .PP
-\fBrestic find [flags] PATTERN\fP
+\fBrestic find [flags] PATTERN...\fP
 
 
 .SH DESCRIPTION
 .PP
 The "find" command searches for files or directories in snapshots stored in the
 repo.
+It can also be used to search for restic blobs or trees for troubleshooting.
 
 
 .SH OPTIONS
+.PP
+\fB\-\-blob\fP[=false]
+    pattern is a blob\-ID
+
 .PP
 \fB\-h\fP, \fB\-\-help\fP[=false]
     help for find
@@ -45,8 +50,16 @@ repo.
     oldest modification date/time
 
 .PP
+\fB\-\-pack\fP[=false]
+    pattern is a pack\-ID
+
+.PP
 \fB\-\-path\fP=[]
     only consider snapshots which include this (absolute) \fB\fCpath\fR, when no snapshot\-ID is given
+
+.PP
+\fB\-\-show\-pack\-id\fP[=false]
+    display the pack\-ID the blobs belong to (with \-\-blob or \-\-tree)
 
 .PP
 \fB\-s\fP, \fB\-\-snapshot\fP=[]
@@ -56,15 +69,19 @@ repo.
 \fB\-\-tag\fP=[]
     only consider snapshots which include this \fB\fCtaglist\fR, when no snapshot\-ID is given
 
+.PP
+\fB\-\-tree\fP[=false]
+    pattern is a tree\-ID
+
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
 \fB\-\-cacert\fP=[]
-    path to load root certificates from (default: use system certificates)
+    \fB\fCfile\fR to load root certificates from (default: use system certificates)
 
 .PP
 \fB\-\-cache\-dir\fP=""
-    set the cache directory
+    set the cache directory. (default: use system default cache directory)
 
 .PP
 \fB\-\-cleanup\-cache\fP[=false]
@@ -73,6 +90,10 @@ repo.
 .PP
 \fB\-\-json\fP[=false]
     set output mode to JSON for commands that support it
+
+.PP
+\fB\-\-key\-hint\fP=""
+    key ID of key to try decrypting first (default: $RESTIC\_KEY\_HINT)
 
 .PP
 \fB\-\-limit\-download\fP=0
@@ -95,6 +116,10 @@ repo.
     set extended option (\fB\fCkey=value\fR, can be specified multiple times)
 
 .PP
+\fB\-\-password\-command\fP=""
+    specify a shell command to obtain a password (default: $RESTIC\_PASSWORD\_COMMAND)
+
+.PP
 \fB\-p\fP, \fB\-\-password\-file\fP=""
     read the repository password from a file (default: $RESTIC\_PASSWORD\_FILE)
 
@@ -109,6 +134,26 @@ repo.
 .PP
 \fB\-\-tls\-client\-cert\fP=""
     path to a file containing PEM encoded TLS client certificate and private key
+
+.PP
+\fB\-v\fP, \fB\-\-verbose\fP[=0]
+    be verbose (specify \-\-verbose multiple times or level \fB\fCn\fR)
+
+
+.SH EXAMPLE
+.PP
+.RS
+
+.nf
+restic find config.json
+restic find \-\-json "*.yml" "*.json"
+restic find \-\-json \-\-blob 420f620f b46ebe8a ddd38656
+restic find \-\-show\-pack\-id \-\-blob 420f620f
+restic find \-\-tree 577c2bc9 f81f2e22 a62827a9
+restic find \-\-pack 025c1d06
+
+.fi
+.RE
 
 
 .SH SEE ALSO

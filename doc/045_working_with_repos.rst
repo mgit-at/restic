@@ -56,6 +56,31 @@ Or filter by host:
 
 Combining filters is also possible.
 
+Furthermore you can group the output by the same filters (host, paths, tags):
+
+.. code-block:: console
+
+    $ restic -r /srv/restic-repo snapshots --group-by host
+
+    enter password for repository:
+    snapshots for (host [kasimir])
+    ID        Date                 Host    Tags   Directory
+    ----------------------------------------------------------------------
+    40dc1520  2015-05-08 21:38:30  kasimir        /home/user/work
+    79766175  2015-05-08 21:40:19  kasimir        /home/user/work
+    2 snapshots
+    snapshots for (host [luigi])
+    ID        Date                 Host    Tags   Directory
+    ----------------------------------------------------------------------
+    bdbd3439  2015-05-08 21:45:17  luigi          /home/art
+    9f0bc19e  2015-05-08 21:46:11  luigi          /srv
+    2 snapshots
+    snapshots for (host [kazik])
+    ID        Date                 Host    Tags   Directory
+    ----------------------------------------------------------------------
+    590c8fc8  2015-05-08 21:47:38  kazik          /srv
+    1 snapshots
+
 
 Checking a repo's integrity and consistency
 ===========================================
@@ -66,7 +91,7 @@ backup with the intention to make you restore malicious data:
 
 .. code-block:: console
 
-    $ sudo echo "boom" >> backup/index/d795ffa99a8ab8f8e42cec1f814df4e48b8f49129360fb57613df93739faee97
+    $ echo "boom" >> backup/index/d795ffa99a8ab8f8e42cec1f814df4e48b8f49129360fb57613df93739faee97
 
 In order to detect these things, it is a good idea to regularly use the
 ``check`` command to test whether everything is alright, your precious
@@ -99,10 +124,11 @@ data files:
     check snapshots, trees and blobs
     read all data
 
-Use ``--read-data-subset=n/t`` parameter to check subset of repository data
-files. The parameter takes two values, ``n`` and ``t``. All repository data 
-files are logically devided in ``t`` roughly equal groups and only files that
-belong to the group number ``n`` are checked. For example, the following 
+Use the ``--read-data-subset=n/t`` parameter to check only a subset of the
+repository data files at a time. The parameter takes two values, ``n`` and
+``t``. When the check command runs, all data files in the repository are
+logically divided in ``t`` (roughly equal) groups, and only files that
+belong to the group number ``n`` are checked. For example, the following
 commands check all repository data files over 5 separate invocations:
 
 .. code-block:: console

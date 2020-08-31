@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/restic/restic/internal/backend/rest"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/limiter"
 	"golang.org/x/net/context/ctxhttp"
 	"golang.org/x/net/http2"
 )
@@ -81,8 +83,38 @@ func run(command string, args ...string) (*StdioConn, *exec.Cmd, *sync.WaitGroup
 	return c, cmd, &wg, bg, nil
 }
 
+// wrappedConn adds bandwidth limiting capabilities to the StdioConn by
+// wrapping the Read/Write methods.
+type wrappedConn struct {
+	*StdioConn
+	io.Reader
+	io.Writer
+}
+
+func (c wrappedConn) Read(p []byte) (int, error) {
+	return c.Reader.Read(p)
+}
+
+func (c wrappedConn) Write(p []byte) (int, error) {
+	return c.Writer.Write(p)
+}
+
+func wrapConn(c *StdioConn, lim limiter.Limiter) wrappedConn {
+	wc := wrappedConn{
+		StdioConn: c,
+		Reader:    c,
+		Writer:    c,
+	}
+	if lim != nil {
+		wc.Reader = lim.Downstream(c)
+		wc.Writer = lim.UpstreamWriter(c)
+	}
+
+	return wc
+}
+
 // New initializes a Backend and starts the process.
-func New(cfg Config) (*Backend, error) {
+func New(cfg Config, lim limiter.Limiter) (*Backend, error) {
 	var (
 		args []string
 		err  error
@@ -95,8 +127,6 @@ func New(cfg Config) (*Backend, error) {
 			return nil, err
 		}
 		args = append(args, a...)
-	} else {
-		args = append(args, "rclone")
 	}
 
 	// then add the arguments
@@ -107,10 +137,6 @@ func New(cfg Config) (*Backend, error) {
 		}
 
 		args = append(args, a...)
-	} else {
-		args = append(args,
-			"serve", "restic", "--stdio",
-			"--b2-hard-delete", "--drive-use-trash=false")
 	}
 
 	// finally, add the remote
@@ -118,9 +144,14 @@ func New(cfg Config) (*Backend, error) {
 	arg0, args := args[0], args[1:]
 
 	debug.Log("running command: %v %v", arg0, args)
-	conn, cmd, wg, bg, err := run(arg0, args...)
+	stdioConn, cmd, wg, bg, err := run(arg0, args...)
 	if err != nil {
 		return nil, err
+	}
+
+	var conn net.Conn = stdioConn
+	if lim != nil {
+		conn = wrapConn(stdioConn, lim)
 	}
 
 	dialCount := 0
@@ -141,7 +172,7 @@ func New(cfg Config) (*Backend, error) {
 		tr:     tr,
 		cmd:    cmd,
 		waitCh: waitCh,
-		conn:   conn,
+		conn:   stdioConn,
 		wg:     wg,
 	}
 
@@ -173,7 +204,7 @@ func New(cfg Config) (*Backend, error) {
 
 	// send an HTTP request to the base URL, see if the server is there
 	client := &http.Client{
-		Transport: tr,
+		Transport: debug.RoundTripper(tr),
 		Timeout:   60 * time.Second,
 	}
 
@@ -202,8 +233,8 @@ func New(cfg Config) (*Backend, error) {
 }
 
 // Open starts an rclone process with the given config.
-func Open(cfg Config) (*Backend, error) {
-	be, err := New(cfg)
+func Open(cfg Config, lim limiter.Limiter) (*Backend, error) {
+	be, err := New(cfg, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +249,7 @@ func Open(cfg Config) (*Backend, error) {
 		URL:         url,
 	}
 
-	restBackend, err := rest.Open(restConfig, be.tr)
+	restBackend, err := rest.Open(restConfig, debug.RoundTripper(be.tr))
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +260,7 @@ func Open(cfg Config) (*Backend, error) {
 
 // Create initializes a new restic repo with clone.
 func Create(cfg Config) (*Backend, error) {
-	be, err := New(cfg)
+	be, err := New(cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +277,7 @@ func Create(cfg Config) (*Backend, error) {
 		URL:         url,
 	}
 
-	restBackend, err := rest.Create(restConfig, be.tr)
+	restBackend, err := rest.Create(restConfig, debug.RoundTripper(be.tr))
 	if err != nil {
 		_ = be.Close()
 		return nil, err

@@ -13,7 +13,12 @@ import (
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/fs"
 	"github.com/restic/restic/internal/restic"
+	tomb "gopkg.in/tomb.v2"
 )
+
+// SelectByNameFunc returns true for all items that should be included (files and
+// dirs). If false is returned, files are ignored and dirs are not even walked.
+type SelectByNameFunc func(item string) bool
 
 // SelectFunc returns true for all items that should be included (files and
 // dirs). If false is returned, files are ignored and dirs are not even walked.
@@ -42,10 +47,11 @@ func (s *ItemStats) Add(other ItemStats) {
 
 // Archiver saves a directory structure to the repo.
 type Archiver struct {
-	Repo    restic.Repository
-	Select  SelectFunc
-	FS      fs.FS
-	Options Options
+	Repo         restic.Repository
+	SelectByName SelectByNameFunc
+	Select       SelectFunc
+	FS           fs.FS
+	Options      Options
 
 	blobSaver *BlobSaver
 	fileSaver *FileSaver
@@ -72,7 +78,8 @@ type Archiver struct {
 	// WithAtime configures if the access time for files and directories should
 	// be saved. Enabling it may result in much metadata, so it's off by
 	// default.
-	WithAtime bool
+	WithAtime   bool
+	IgnoreInode bool
 }
 
 // Options is used to configure the archiver.
@@ -118,47 +125,28 @@ func (o Options) ApplyDefaults() Options {
 // New initializes a new archiver.
 func New(repo restic.Repository, fs fs.FS, opts Options) *Archiver {
 	arch := &Archiver{
-		Repo:    repo,
-		Select:  func(string, os.FileInfo) bool { return true },
-		FS:      fs,
-		Options: opts.ApplyDefaults(),
+		Repo:         repo,
+		SelectByName: func(item string) bool { return true },
+		Select:       func(item string, fi os.FileInfo) bool { return true },
+		FS:           fs,
+		Options:      opts.ApplyDefaults(),
 
 		CompleteItem: func(string, *restic.Node, *restic.Node, ItemStats, time.Duration) {},
 		StartFile:    func(string) {},
 		CompleteBlob: func(string, uint64) {},
+		IgnoreInode:  false,
 	}
 
 	return arch
 }
 
-// Valid returns an error if anything is missing.
-func (arch *Archiver) Valid() error {
-	if arch.blobSaver == nil {
-		return errors.New("blobSaver is nil")
-	}
-
-	if arch.fileSaver == nil {
-		return errors.New("fileSaver is nil")
-	}
-
-	if arch.Repo == nil {
-		return errors.New("repo is not set")
-	}
-
-	if arch.Select == nil {
-		return errors.New("Select is not set")
-	}
-
-	if arch.FS == nil {
-		return errors.New("FS is not set")
-	}
-
-	return nil
-}
-
-// error calls arch.Error if it is set.
+// error calls arch.Error if it is set and the error is different from context.Canceled.
 func (arch *Archiver) error(item string, fi os.FileInfo, err error) error {
 	if arch.Error == nil || err == nil {
+		return err
+	}
+
+	if err == context.Canceled {
 		return err
 	}
 
@@ -184,10 +172,8 @@ func (arch *Archiver) saveTree(ctx context.Context, t *restic.Tree) (restic.ID, 
 
 	b := &Buffer{Data: buf}
 	res := arch.blobSaver.Save(ctx, restic.TreeBlob, b)
-	if res.Err() != nil {
-		return restic.ID{}, s, res.Err()
-	}
 
+	res.Wait(ctx)
 	if !res.Known() {
 		s.TreeBlobs++
 		s.TreeSize += uint64(len(buf))
@@ -238,6 +224,12 @@ func (arch *Archiver) SaveDir(ctx context.Context, snPath string, fi os.FileInfo
 	nodes := make([]FutureNode, 0, len(names))
 
 	for _, name := range names {
+		// test if context has been cancelled
+		if ctx.Err() != nil {
+			debug.Log("context has been cancelled, aborting")
+			return FutureTree{}, ctx.Err()
+		}
+
 		pathname := arch.FS.Join(dir, name)
 		oldNode := previous.Find(name)
 		snItem := join(snPath, name)
@@ -280,14 +272,15 @@ type FutureNode struct {
 
 	isFile bool
 	file   FutureFile
-	isDir  bool
-	dir    FutureTree
+	isTree bool
+	tree   FutureTree
 }
 
 func (fn *FutureNode) wait(ctx context.Context) {
 	switch {
 	case fn.isFile:
 		// wait for and collect the data for the file
+		fn.file.Wait(ctx)
 		fn.node = fn.file.Node()
 		fn.err = fn.file.Err()
 		fn.stats = fn.file.Stats()
@@ -296,22 +289,23 @@ func (fn *FutureNode) wait(ctx context.Context) {
 		fn.file = FutureFile{}
 		fn.isFile = false
 
-	case fn.isDir:
+	case fn.isTree:
 		// wait for and collect the data for the dir
-		fn.node = fn.dir.Node()
-		fn.err = fn.dir.Err()
-		fn.stats = fn.dir.Stats()
+		fn.tree.Wait(ctx)
+		fn.node = fn.tree.Node()
+		fn.stats = fn.tree.Stats()
 
 		// ensure the other stuff can be garbage-collected
-		fn.dir = FutureTree{}
-		fn.isDir = false
+		fn.tree = FutureTree{}
+		fn.isTree = false
 	}
 }
 
 // Save saves a target (file or directory) to the repo. If the item is
-// excluded,this function returns a nil node and error.
+// excluded, this function returns a nil node and error, with excluded set to
+// true.
 //
-// Errors and completion is needs to be handled by the caller.
+// Errors and completion needs to be handled by the caller.
 //
 // snPath is the path within the current snapshot.
 func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous *restic.Node) (fn FutureNode, excluded bool, err error) {
@@ -330,6 +324,13 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 
 	fn.absTarget = abstarget
 
+	// exclude files by path before running Lstat to reduce number of lstat calls
+	if !arch.SelectByName(abstarget) {
+		debug.Log("%v is excluded by path", target)
+		return FutureNode{}, true, nil
+	}
+
+	// get file info and run remaining select functions that require file information
 	fi, err := arch.FS.Lstat(target)
 	if !arch.Select(abstarget, fi) {
 		debug.Log("%v is excluded", target)
@@ -352,7 +353,7 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 
 		// reopen file and do an fstat() on the open file to check it is still
 		// a file (and has not been exchanged for e.g. a symlink)
-		file, err := arch.FS.OpenFile(target, fs.O_RDONLY|fs.O_NOFOLLOW|fs.O_NONBLOCK, 0)
+		file, err := arch.FS.OpenFile(target, fs.O_RDONLY|fs.O_NOFOLLOW, 0)
 		if err != nil {
 			debug.Log("Openfile() for %v returned error: %v", target, err)
 			err = arch.error(abstarget, fi, err)
@@ -383,12 +384,19 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 			return FutureNode{}, true, nil
 		}
 
-		// use previous node if the file hasn't changed
-		if previous != nil && !fileChanged(fi, previous) {
-			debug.Log("%v hasn't changed, returning old node", target)
+		// use previous list of blobs if the file hasn't changed
+		if previous != nil && !fileChanged(fi, previous, arch.IgnoreInode) {
+			debug.Log("%v hasn't changed, using old list of blobs", target)
 			arch.CompleteItem(snPath, previous, previous, ItemStats{}, time.Since(start))
 			arch.CompleteBlob(snPath, previous.Size)
-			fn.node = previous
+			fn.node, err = arch.nodeFromFileInfo(target, fi)
+			if err != nil {
+				return FutureNode{}, false, err
+			}
+
+			// copy list of blobs
+			fn.node.Content = previous.Content
+
 			_ = file.Close()
 			return fn, false, nil
 		}
@@ -408,11 +416,12 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 		start := time.Now()
 		oldSubtree := arch.loadSubtree(ctx, previous)
 
-		fn.isDir = true
-		fn.dir, err = arch.SaveDir(ctx, snPath, fi, target, oldSubtree)
+		fn.isTree = true
+		fn.tree, err = arch.SaveDir(ctx, snPath, fi, target, oldSubtree)
 		if err == nil {
 			arch.CompleteItem(snItem, previous, fn.node, fn.stats, time.Since(start))
 		} else {
+			debug.Log("SaveDir for %v returned error: %v", snPath, err)
 			return FutureNode{}, false, err
 		}
 
@@ -436,7 +445,7 @@ func (arch *Archiver) Save(ctx context.Context, snPath, target string, previous 
 
 // fileChanged returns true if the file's content has changed since the node
 // was created.
-func fileChanged(fi os.FileInfo, node *restic.Node) bool {
+func fileChanged(fi os.FileInfo, node *restic.Node, ignoreInode bool) bool {
 	if node == nil {
 		return true
 	}
@@ -451,14 +460,19 @@ func fileChanged(fi os.FileInfo, node *restic.Node) bool {
 		return true
 	}
 
-	// check size
+	// check status change timestamp
 	extFI := fs.ExtendedStat(fi)
+	if !ignoreInode && !extFI.ChangeTime.Equal(node.ChangeTime) {
+		return true
+	}
+
+	// check size
 	if uint64(fi.Size()) != node.Size || uint64(extFI.Size) != node.Size {
 		return true
 	}
 
 	// check inode
-	if node.Inode != extFI.Inode {
+	if !ignoreInode && node.Inode != extFI.Inode {
 		return true
 	}
 
@@ -495,7 +509,20 @@ func (arch *Archiver) SaveTree(ctx context.Context, snPath string, atree *Tree, 
 
 	futureNodes := make(map[string]FutureNode)
 
-	for name, subatree := range atree.Nodes {
+	// iterate over the nodes of atree in lexicographic (=deterministic) order
+	names := make([]string, 0, len(atree.Nodes))
+	for name := range atree.Nodes {
+		names = append(names, name)
+	}
+	sort.Stable(sort.StringSlice(names))
+
+	for _, name := range names {
+		subatree := atree.Nodes[name]
+
+		// test if context has been cancelled
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 
 		// this is a leaf node
 		if subatree.Path != "" {
@@ -623,7 +650,7 @@ func readdir(filesystem fs.FS, dir string) ([]os.FileInfo, error) {
 	entries, err := f.Readdir(-1)
 	if err != nil {
 		_ = f.Close()
-		return nil, errors.Wrap(err, "Readdir")
+		return nil, errors.Wrapf(err, "Readdir %v failed", dir)
 	}
 
 	err = f.Close()
@@ -644,7 +671,7 @@ func readdirnames(filesystem fs.FS, dir string) ([]string, error) {
 	entries, err := f.Readdirnames(-1)
 	if err != nil {
 		_ = f.Close()
-		return nil, errors.Wrap(err, "Readdirnames")
+		return nil, errors.Wrapf(err, "Readdirnames %v failed", dir)
 	}
 
 	err = f.Close()
@@ -722,32 +749,22 @@ func (arch *Archiver) loadParentTree(ctx context.Context, snapshotID restic.ID) 
 }
 
 // runWorkers starts the worker pools, which are stopped when the context is cancelled.
-func (arch *Archiver) runWorkers(ctx context.Context) {
-	arch.blobSaver = NewBlobSaver(ctx, arch.Repo, arch.Options.SaveBlobConcurrency)
+func (arch *Archiver) runWorkers(ctx context.Context, t *tomb.Tomb) {
+	arch.blobSaver = NewBlobSaver(ctx, t, arch.Repo, arch.Options.SaveBlobConcurrency)
 
-	arch.fileSaver = NewFileSaver(ctx,
+	arch.fileSaver = NewFileSaver(ctx, t,
 		arch.FS,
-		arch.blobSaver,
+		arch.blobSaver.Save,
 		arch.Repo.Config().ChunkerPolynomial,
 		arch.Options.FileReadConcurrency, arch.Options.SaveBlobConcurrency)
 	arch.fileSaver.CompleteBlob = arch.CompleteBlob
 	arch.fileSaver.NodeFromFileInfo = arch.nodeFromFileInfo
 
-	arch.treeSaver = NewTreeSaver(ctx, arch.Options.SaveTreeConcurrency, arch.saveTree, arch.error)
+	arch.treeSaver = NewTreeSaver(ctx, t, arch.Options.SaveTreeConcurrency, arch.saveTree, arch.Error)
 }
 
 // Snapshot saves several targets and returns a snapshot.
 func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts SnapshotOptions) (*restic.Snapshot, restic.ID, error) {
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	arch.runWorkers(workerCtx)
-
-	err := arch.Valid()
-	if err != nil {
-		return nil, restic.ID{}, err
-	}
-
 	cleanTargets, err := resolveRelativeTargets(arch.FS, targets)
 	if err != nil {
 		return nil, restic.ID{}, err
@@ -758,14 +775,37 @@ func (arch *Archiver) Snapshot(ctx context.Context, targets []string, opts Snaps
 		return nil, restic.ID{}, err
 	}
 
+	var t tomb.Tomb
+	wctx := t.Context(ctx)
+
+	arch.runWorkers(wctx, &t)
+
 	start := time.Now()
-	tree, err := arch.SaveTree(ctx, "/", atree, arch.loadParentTree(ctx, opts.ParentSnapshot))
-	if err != nil {
-		return nil, restic.ID{}, err
+
+	debug.Log("starting snapshot")
+	rootTreeID, stats, err := func() (restic.ID, ItemStats, error) {
+		tree, err := arch.SaveTree(wctx, "/", atree, arch.loadParentTree(wctx, opts.ParentSnapshot))
+		if err != nil {
+			return restic.ID{}, ItemStats{}, err
+		}
+
+		if len(tree.Nodes) == 0 {
+			return restic.ID{}, ItemStats{}, errors.New("snapshot is empty")
+		}
+
+		return arch.saveTree(wctx, tree)
+	}()
+	debug.Log("saved tree, error: %v", err)
+
+	t.Kill(nil)
+	werr := t.Wait()
+	debug.Log("err is %v, werr is %v", err, werr)
+	if err == nil || errors.Cause(err) == context.Canceled {
+		err = werr
 	}
 
-	rootTreeID, stats, err := arch.saveTree(ctx, tree)
 	if err != nil {
+		debug.Log("error while saving tree: %v", err)
 		return nil, restic.ID{}, err
 	}
 

@@ -22,6 +22,10 @@ func (node Node) restoreSymlinkTimestamps(path string, utimes [2]syscall.Timespe
 	return nil
 }
 
+func (node Node) device() int {
+	return int(node.Device)
+}
+
 // Getxattr retrieves extended attribute data associated with path.
 func Getxattr(path, name string) ([]byte, error) {
 	return nil, nil
@@ -72,5 +76,6 @@ func (s statWin) mtim() syscall.Timespec {
 }
 
 func (s statWin) ctim() syscall.Timespec {
-	return syscall.NsecToTimespec(s.CreationTime.Nanoseconds())
+	// Windows does not have the concept of a "change time" in the sense Unix uses it, so we're using the LastWriteTime here.
+	return syscall.NsecToTimespec(s.LastWriteTime.Nanoseconds())
 }

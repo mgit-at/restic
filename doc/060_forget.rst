@@ -23,6 +23,13 @@ data that was referenced by the snapshot from the repository. This can
 be automated with the ``--prune`` option of the ``forget`` command,
 which runs ``prune`` automatically if snapshots have been removed.
 
+.. Warning::
+
+   Pruning snapshots can be a very time-consuming process, taking nearly
+   as long as backups themselves. During a prune operation, the index is
+   locked and backups cannot be completed. Performance improvements are 
+   planned for this feature.
+
 It is advisable to run ``restic check`` after pruning, to make sure
 you are alerted, should the internal data structures of the repository
 be damaged.
@@ -159,6 +166,14 @@ The ``forget`` command accepts the following parameters:
    snapshots, only keep the last one for that year.
 -  ``--keep-tag`` keep all snapshots which have all tags specified by
    this option (can be specified multiple times).
+-  ``--keep-within duration`` keep all snapshots which have been made within
+   the duration of the latest snapshot. ``duration`` needs to be a number of
+   years, months, days, and hours, e.g. ``2y5m7d3h`` will keep all snapshots
+   made in the two years, five months, seven days, and three hours before the
+   latest snapshot.
+
+Multiple policies will be ORed together so as to be as inclusive as possible
+for keeping snapshots.
 
 Additionally, you can restrict removing snapshots to those which have a
 particular hostname with the ``--hostname`` parameter, or tags with the
@@ -182,7 +197,7 @@ To only keep the last snapshot of all snapshots with both the tag ``foo`` and
 
 .. code-block:: console
 
-   $ restic forget --tag foo,tag bar --keep-last 1
+   $ restic forget --tag foo,bar --keep-last 1
 
 All the ``--keep-*`` options above only count
 hours/days/weeks/months/years which have a snapshot, so those without a
@@ -195,7 +210,7 @@ all snapshots, use ``--keep-last 1`` and then finally remove the last
 snapshot ID manually (by passing the ID to ``forget``).
 
 All snapshots are evaluated against all matching ``--keep-*`` counts. A
-single snapshot on 2017-09-30 (Sun) will count as a daily, weekly and monthly.
+single snapshot on 2017-09-30 (Sat) will count as a daily, weekly and monthly.
 
 Let's explain this with an example: Suppose you have only made a backup
 on each Sunday for 12 weeks. Then ``forget --keep-daily 4`` will keep

@@ -40,7 +40,7 @@ type Backup struct {
 	processedCh chan counter
 	errCh       chan struct{}
 	workerCh    chan fileWorkerMessage
-	clearStatus chan struct{}
+	finished    chan struct{}
 
 	summary struct {
 		sync.Mutex
@@ -49,6 +49,7 @@ type Backup struct {
 			Changed   uint
 			Unchanged uint
 		}
+		ProcessedBytes uint64
 		archiver.ItemStats
 	}
 }
@@ -69,7 +70,7 @@ func NewBackup(term *termstatus.Terminal, verbosity uint) *Backup {
 		processedCh: make(chan counter),
 		errCh:       make(chan struct{}),
 		workerCh:    make(chan fileWorkerMessage),
-		clearStatus: make(chan struct{}),
+		finished:    make(chan struct{}),
 	}
 }
 
@@ -92,7 +93,7 @@ func (b *Backup) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-b.clearStatus:
+		case <-b.finished:
 			started = false
 			b.term.SetStatus([]string{""})
 		case t, ok := <-b.totalCh:
@@ -150,16 +151,18 @@ func (b *Backup) update(total, processed counter, errors uint, currentFiles map[
 			processed.Files, formatBytes(processed.Bytes), errors,
 		)
 	} else {
-		var eta string
+		var eta, percent string
 
 		if secs > 0 && processed.Bytes < total.Bytes {
 			eta = fmt.Sprintf(" ETA %s", formatSeconds(secs))
+			percent = formatPercent(processed.Bytes, total.Bytes)
+			percent += "  "
 		}
 
 		// include totals
-		status = fmt.Sprintf("[%s] %s  %v files %s, total %v files %v, %d errors%s",
+		status = fmt.Sprintf("[%s] %s%v files %s, total %v files %v, %d errors%s",
 			formatDuration(time.Since(b.start)),
-			formatPercent(processed.Bytes, total.Bytes),
+			percent,
 			processed.Files,
 			formatBytes(processed.Bytes),
 			total.Files,
@@ -173,7 +176,7 @@ func (b *Backup) update(total, processed counter, errors uint, currentFiles map[
 	for filename := range currentFiles {
 		lines = append(lines, filename)
 	}
-	sort.Sort(sort.StringSlice(lines))
+	sort.Strings(lines)
 	lines = append([]string{status}, lines...)
 
 	b.term.SetStatus(lines)
@@ -252,14 +255,25 @@ func formatBytes(c uint64) string {
 	}
 }
 
-// CompleteItemFn is the status callback function for the archiver when a
+// CompleteItem is the status callback function for the archiver when a
 // file/dir has been saved successfully.
-func (b *Backup) CompleteItemFn(item string, previous, current *restic.Node, s archiver.ItemStats, d time.Duration) {
+func (b *Backup) CompleteItem(item string, previous, current *restic.Node, s archiver.ItemStats, d time.Duration) {
 	b.summary.Lock()
 	b.summary.ItemStats.Add(s)
+
+	// for the last item "/", current is nil
+	if current != nil {
+		b.summary.ProcessedBytes += current.Size
+	}
+
 	b.summary.Unlock()
 
 	if current == nil {
+		// error occurred, tell the status display to remove the line
+		b.workerCh <- fileWorkerMessage{
+			filename: item,
+			done:     true,
+		}
 		return
 	}
 
@@ -326,7 +340,10 @@ func (b *Backup) CompleteItemFn(item string, previous, current *restic.Node, s a
 
 // ReportTotal sets the total stats up to now
 func (b *Backup) ReportTotal(item string, s archiver.ScanStats) {
-	b.totalCh <- counter{Files: s.Files, Dirs: s.Dirs, Bytes: s.Bytes}
+	select {
+	case b.totalCh <- counter{Files: s.Files, Dirs: s.Dirs, Bytes: s.Bytes}:
+	case <-b.finished:
+	}
 
 	if item == "" {
 		b.V("scan finished in %.3fs: %v files, %s",
@@ -339,19 +356,25 @@ func (b *Backup) ReportTotal(item string, s archiver.ScanStats) {
 }
 
 // Finish prints the finishing messages.
-func (b *Backup) Finish() {
-	b.clearStatus <- struct{}{}
+func (b *Backup) Finish(snapshotID restic.ID) {
+	close(b.finished)
 
 	b.P("\n")
 	b.P("Files:       %5d new, %5d changed, %5d unmodified\n", b.summary.Files.New, b.summary.Files.Changed, b.summary.Files.Unchanged)
 	b.P("Dirs:        %5d new, %5d changed, %5d unmodified\n", b.summary.Dirs.New, b.summary.Dirs.Changed, b.summary.Dirs.Unchanged)
 	b.V("Data Blobs:  %5d new\n", b.summary.ItemStats.DataBlobs)
 	b.V("Tree Blobs:  %5d new\n", b.summary.ItemStats.TreeBlobs)
-	b.P("Added:      %-5s\n", formatBytes(b.summary.ItemStats.DataSize+b.summary.ItemStats.TreeSize))
+	b.P("Added to the repo: %-5s\n", formatBytes(b.summary.ItemStats.DataSize+b.summary.ItemStats.TreeSize))
 	b.P("\n")
 	b.P("processed %v files, %v in %s",
 		b.summary.Files.New+b.summary.Files.Changed+b.summary.Files.Unchanged,
-		formatBytes(b.totalBytes),
+		formatBytes(b.summary.ProcessedBytes),
 		formatDuration(time.Since(b.start)),
 	)
+}
+
+// SetMinUpdatePause sets b.MinUpdatePause. It satisfies the
+// ArchiveProgressReporter interface.
+func (b *Backup) SetMinUpdatePause(d time.Duration) {
+	b.MinUpdatePause = d
 }

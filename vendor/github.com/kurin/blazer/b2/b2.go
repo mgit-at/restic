@@ -1,4 +1,4 @@
-// Copyright 2016, Google
+// Copyright 2016, the Blazer authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
@@ -45,7 +46,8 @@ type Client struct {
 	slock    sync.Mutex
 	sWriters map[string]*Writer
 	sReaders map[string]*Reader
-	sMethods map[string]int
+	sMethods []methodCounter
+	opts     clientOptions
 }
 
 // NewClient creates and returns a new Client with valid B2 service account
@@ -55,10 +57,18 @@ func NewClient(ctx context.Context, account, key string, opts ...ClientOption) (
 		backend: &beRoot{
 			b2i: &b2Root{},
 		},
-		sMethods: make(map[string]int),
+		sMethods: []methodCounter{
+			newMethodCounter(time.Minute, time.Second),
+			newMethodCounter(time.Minute*5, time.Second),
+			newMethodCounter(time.Hour, time.Minute),
+			newMethodCounter(0, 0), // forever
+		},
 	}
 	opts = append(opts, client(c))
-	if err := c.backend.authorizeAccount(ctx, account, key, opts...); err != nil {
+	for _, f := range opts {
+		f(&c.opts)
+	}
+	if err := c.backend.authorizeAccount(ctx, account, key, c.opts); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -70,7 +80,9 @@ type clientOptions struct {
 	failSomeUploads bool
 	expireTokens    bool
 	capExceeded     bool
+	apiBase         string
 	userAgents      []string
+	writerOpts      []WriterOption
 }
 
 // A ClientOption allows callers to adjust various per-client settings.
@@ -84,6 +96,13 @@ type ClientOption func(*clientOptions)
 func UserAgent(agent string) ClientOption {
 	return func(o *clientOptions) {
 		o.userAgents = append(o.userAgents, agent)
+	}
+}
+
+// APIBase returns a ClientOption specifying the URL root of API requests.
+func APIBase(url string) ClientOption {
+	return func(o *clientOptions) {
+		o.apiBase = url
 	}
 }
 
@@ -131,17 +150,30 @@ type clientTransport struct {
 }
 
 func (ct *clientTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	method := r.Header.Get("X-Blazer-Method")
-	if method != "" && ct.client != nil {
-		ct.client.slock.Lock()
-		ct.client.sMethods[method]++
-		ct.client.slock.Unlock()
-	}
+	m := r.Header.Get("X-Blazer-Method")
 	t := ct.rt
 	if t == nil {
 		t = http.DefaultTransport
 	}
-	return t.RoundTrip(r)
+	b := time.Now()
+	resp, err := t.RoundTrip(r)
+	e := time.Now()
+	if err != nil {
+		return resp, err
+	}
+	if m != "" && ct.client != nil {
+		ct.client.slock.Lock()
+		m := method{
+			name:     m,
+			duration: e.Sub(b),
+			status:   resp.StatusCode,
+		}
+		for _, counter := range ct.client.sMethods {
+			counter.record(m)
+		}
+		ct.client.slock.Unlock()
+	}
+	return resp, nil
 }
 
 // Bucket is a reference to a B2 bucket.
@@ -396,7 +428,7 @@ type Attrs struct {
 	ContentType     string            // Used on upload, default is "application/octet-stream".
 	Status          ObjectState       // Not used on upload.
 	UploadTimestamp time.Time         // Not used on upload.
-	SHA1            string            // Not used on upload. Can be "none" for large files.
+	SHA1            string            // Can be "none" for large files.  If set on upload, will be used for large files.
 	LastModified    time.Time         // If present, and there are fewer than 10 keys in the Info field, this is saved on upload.
 	Info            map[string]string // Save arbitrary metadata on upload, but limited to 10 keys.
 }
@@ -436,6 +468,9 @@ func (o *Object) Attrs(ctx context.Context) (*Attrs, error) {
 		mtime = time.Unix(ms/1e3, (ms%1e3)*1e6)
 		delete(info, "src_last_modified_millis")
 	}
+	if v, ok := info["large_file_sha1"]; ok {
+		sha = v
+	}
 	return &Attrs{
 		Name:            name,
 		Size:            size,
@@ -463,7 +498,7 @@ const (
 	Hider
 
 	// Folder is a special state given to non-objects that are returned during a
-	// List*Objects call with a non-empty Delimiter.
+	// List call with a ListDelimiter option.
 	Folder
 )
 
@@ -486,14 +521,21 @@ func (o *Object) URL() string {
 // overwritten are not deleted, but are "hidden".
 //
 // Callers must close the writer when finished and check the error status.
-func (o *Object) NewWriter(ctx context.Context) *Writer {
+func (o *Object) NewWriter(ctx context.Context, opts ...WriterOption) *Writer {
 	ctx, cancel := context.WithCancel(ctx)
-	return &Writer{
+	w := &Writer{
 		o:      o,
 		name:   o.name,
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	for _, f := range o.b.c.opts.writerOpts {
+		f(w)
+	}
+	for _, f := range opts {
+		f(w)
+	}
+	return w
 }
 
 // NewRangeReader returns a reader for the given object, reading up to length
@@ -535,131 +577,6 @@ func (o *Object) Delete(ctx context.Context) error {
 	return o.f.deleteFileVersion(ctx)
 }
 
-// Cursor is passed to ListObjects to return subsequent pages.
-type Cursor struct {
-	// Prefix limits the listed objects to those that begin with this string.
-	Prefix string
-
-	// Delimiter denotes the path separator.  If set, object listings will be
-	// truncated at this character.
-	//
-	// For example, if the bucket contains objects foo/bar, foo/baz, and foo,
-	// then a delimiter of "/" will cause the listing to return "foo" and "foo/".
-	// Otherwise, the listing would have returned all object names.
-	//
-	// Note that objects returned that end in the delimiter may not be actual
-	// objects, e.g. you cannot read from (or write to, or delete) an object "foo/",
-	// both because no actual object exists and because B2 disallows object names
-	// that end with "/".  If you want to ensure that all objects returned by
-	// ListObjects and ListCurrentObjects are actual objects, leave this unset.
-	Delimiter string
-
-	name string
-	id   string
-}
-
-// ListObjects returns all objects in the bucket, including multiple versions
-// of the same object.  Cursor may be nil; when passed to a subsequent query,
-// it will continue the listing.
-//
-// ListObjects will return io.EOF when there are no objects left in the bucket,
-// however it may do so concurrently with the last objects.
-func (b *Bucket) ListObjects(ctx context.Context, count int, c *Cursor) ([]*Object, *Cursor, error) {
-	if c == nil {
-		c = &Cursor{}
-	}
-	fs, name, id, err := b.b.listFileVersions(ctx, count, c.name, c.id, c.Prefix, c.Delimiter)
-	if err != nil {
-		return nil, nil, err
-	}
-	var next *Cursor
-	if name != "" && id != "" {
-		next = &Cursor{
-			Prefix:    c.Prefix,
-			Delimiter: c.Delimiter,
-			name:      name,
-			id:        id,
-		}
-	}
-	var objects []*Object
-	for _, f := range fs {
-		objects = append(objects, &Object{
-			name: f.name(),
-			f:    f,
-			b:    b,
-		})
-	}
-	var rtnErr error
-	if len(objects) == 0 || next == nil {
-		rtnErr = io.EOF
-	}
-	return objects, next, rtnErr
-}
-
-// ListCurrentObjects is similar to ListObjects, except that it returns only
-// current, unhidden objects in the bucket.
-func (b *Bucket) ListCurrentObjects(ctx context.Context, count int, c *Cursor) ([]*Object, *Cursor, error) {
-	if c == nil {
-		c = &Cursor{}
-	}
-	fs, name, err := b.b.listFileNames(ctx, count, c.name, c.Prefix, c.Delimiter)
-	if err != nil {
-		return nil, nil, err
-	}
-	var next *Cursor
-	if name != "" {
-		next = &Cursor{
-			Prefix:    c.Prefix,
-			Delimiter: c.Delimiter,
-			name:      name,
-		}
-	}
-	var objects []*Object
-	for _, f := range fs {
-		objects = append(objects, &Object{
-			name: f.name(),
-			f:    f,
-			b:    b,
-		})
-	}
-	var rtnErr error
-	if len(objects) == 0 || next == nil {
-		rtnErr = io.EOF
-	}
-	return objects, next, rtnErr
-}
-
-// ListUnfinishedLargeFiles lists any objects that correspond to large file uploads that haven't been completed.
-// This can happen for example when an upload is interrupted.
-func (b *Bucket) ListUnfinishedLargeFiles(ctx context.Context, count int, c *Cursor) ([]*Object, *Cursor, error) {
-	if c == nil {
-		c = &Cursor{}
-	}
-	fs, name, err := b.b.listUnfinishedLargeFiles(ctx, count, c.name)
-	if err != nil {
-		return nil, nil, err
-	}
-	var next *Cursor
-	if name != "" {
-		next = &Cursor{
-			name: name,
-		}
-	}
-	var objects []*Object
-	for _, f := range fs {
-		objects = append(objects, &Object{
-			name: f.name(),
-			f:    f,
-			b:    b,
-		})
-	}
-	var rtnErr error
-	if len(objects) == 0 || next == nil {
-		rtnErr = io.EOF
-	}
-	return objects, next, rtnErr
-}
-
 // Hide hides the object from name-based listing.
 func (o *Object) Hide(ctx context.Context) error {
 	if err := o.ensure(ctx); err != nil {
@@ -672,21 +589,20 @@ func (o *Object) Hide(ctx context.Context) error {
 // Reveal unhides (if hidden) the named object.  If there are multiple objects
 // of a given name, it will reveal the most recent.
 func (b *Bucket) Reveal(ctx context.Context, name string) error {
-	cur := &Cursor{
-		name: name,
+	iter := b.List(ctx, ListPrefix(name), ListHidden())
+	for iter.Next() {
+		obj := iter.Object()
+		if obj.Name() == name {
+			if obj.f.status() == "hide" {
+				return obj.Delete(ctx)
+			}
+			return nil
+		}
+		if obj.Name() > name {
+			break
+		}
 	}
-	objs, _, err := b.ListObjects(ctx, 1, cur)
-	if err != nil && err != io.EOF {
-		return err
-	}
-	if len(objs) < 1 || objs[0].name != name {
-		return b2err{err: fmt.Errorf("%s: not found", name), notFoundErr: true}
-	}
-	obj := objs[0]
-	if obj.f.status() != "hide" {
-		return nil
-	}
-	return obj.Delete(ctx)
+	return b2err{err: fmt.Errorf("%s: not found", name), notFoundErr: true}
 }
 
 // I don't want to import all of ioutil for this.
@@ -714,5 +630,24 @@ func (b *Bucket) getObject(ctx context.Context, name string) (*Object, error) {
 // in a private bucket.  Only objects that begin with prefix can be accessed.
 // The token expires after the given duration.
 func (b *Bucket) AuthToken(ctx context.Context, prefix string, valid time.Duration) (string, error) {
-	return b.b.getDownloadAuthorization(ctx, prefix, valid)
+	return b.b.getDownloadAuthorization(ctx, prefix, valid, "")
+}
+
+// AuthURL returns a URL for the given object with embedded token and,
+// possibly, b2ContentDisposition arguments.  Leave b2cd blank for no content
+// disposition.
+func (o *Object) AuthURL(ctx context.Context, valid time.Duration, b2cd string) (*url.URL, error) {
+	token, err := o.b.b.getDownloadAuthorization(ctx, o.name, valid, b2cd)
+	if err != nil {
+		return nil, err
+	}
+	urlString := fmt.Sprintf("%s?Authorization=%s", o.URL(), url.QueryEscape(token))
+	if b2cd != "" {
+		urlString = fmt.Sprintf("%s&b2ContentDisposition=%s", urlString, url.QueryEscape(b2cd))
+	}
+	u, err := url.Parse(urlString)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
 }

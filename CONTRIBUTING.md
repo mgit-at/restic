@@ -46,11 +46,14 @@ Remember, the easier it is for us to reproduce the bug, the earlier it will be
 corrected!
 
 In addition, you can compile restic with debug support by running
-`go run build.go -tags debug` and instructing it to create a debug log by
-setting the environment variable `DEBUG_LOG` to a file, e.g. like this:
+`go run -mod=vendor build.go -tags debug` and instructing it to create a debug
+log by setting the environment variable `DEBUG_LOG` to a file, e.g. like this:
 
     $ export DEBUG_LOG=/tmp/restic-debug.log
     $ restic backup ~/work
+
+For Go < 1.11, you need to remove the `-mod=vendor` option from the build
+command.
 
 Please be aware that the debug log file will contain potentially sensitive
 things like file and directory names, so please either redact it before
@@ -60,9 +63,37 @@ uploading it somewhere or post only the parts that are really relevant.
 Development Environment
 =======================
 
-In order to compile restic with the `go` tool directly, it needs to be checked
-out at the right path within a `GOPATH`. The concept of a `GOPATH` is explained
-in ["How to write Go code"](https://golang.org/doc/code.html).
+The repository contains several sets of directories with code: `cmd/` and
+`internal/` contain the code written for restic, whereas `vendor/` contains
+copies of libraries restic depends on. The libraries are managed with the
+command `go mod vendor`.
+
+Go >= 1.11
+----------
+
+For Go version 1.11 or later, you should clone the repo (without having
+`$GOPATH` set) and `cd` into the directory:
+
+    $ unset GOPATH
+    $ git clone https://github.com/restic/restic
+    $ cd restic
+
+Then use the `go` tool to build restic:
+
+    $ go build ./cmd/restic
+    $ ./restic version
+    restic 0.9.2-dev (compiled manually) compiled with go1.11 on linux/amd64
+
+You can run all tests with the following command:
+
+    $ go test ./...
+
+Go < 1.11
+---------
+
+In order to compile restic with Go before 1.11, it needs to be checked out at
+the right path within a `GOPATH`. The concept of a `GOPATH` is explained in
+["How to write Go code"](https://golang.org/doc/code.html).
 
 If you do not have a directory with Go code yet, executing the following
 instructions in your shell will create one for you and check out the restic
@@ -83,12 +114,7 @@ You can then build restic as follows:
 
 The following commands can be used to run all the tests:
 
-    $ go test ./cmd/... ./internal/...
-
-The repository contains two sets of directories with code: `cmd/` and
-`internal/` contain the code written for restic, whereas `vendor/` contains
-copies of libraries restic depends on. The libraries are managed with the
-[`dep`](https://github.com/golang/dep) tool.
+    $ go test ./...
 
 Providing Patches
 =================
@@ -107,8 +133,7 @@ down to the following steps:
 
  2. Clone the repository locally and create a new branch. If you are working on
     the code itself, please set up the development environment as described in
-    the previous section. Especially take care to place your forked repository
-    at the correct path (`src/github.com/restic/restic`) within your `GOPATH`.
+    the previous section.
 
  3. Then commit your changes as fine grained as possible, as smaller patches,
     that handle one and only one issue are easier to discuss and merge.
@@ -124,11 +149,14 @@ down to the following steps:
     existing commit, use common sense to decide which is better), they will be
     automatically added to the pull request.
 
- 7. If your pull request changes anything that users should be aware of (a
-    bugfix, a new feature, ...) please add an entry to the file
-    ['CHANGELOG.md'](CHANGELOG.md). It will be used in the announcement of the
-    next stable release. While writing, ask yourself: If I were the user, what
-    would I need to be aware of with this change.
+ 7. If your pull request changes anything that users should be aware
+    of (a bugfix, a new feature, ...) please add an entry as a new
+    file in `changelog/unreleased` including the issue number in the
+    filename (e.g. `issue-8756`). Use the template in
+    `changelog/TEMPLATE` for the content. It will be used in the
+    announcement of the next stable release. While writing, ask
+    yourself: If I were the user, what would I need to be aware of
+    with this change.
 
  8. Once your code looks good and passes all the tests, we'll merge it. Thanks
     a lot for your contribution!
@@ -141,13 +169,14 @@ run
 
     gofmt -w **/*.go
 
-in the project root directory before committing. Installing the script
-`fmt-check` from https://github.com/edsrzf/gofmt-git-hook locally as a
-pre-commit hook checks formatting before committing automatically, just copy
-this script to `.git/hooks/pre-commit`.
+in the project root directory before committing. For each Pull Request, the
+formatting is tested with `gofmt` for the latest stable version of Go.
+Installing the script `fmt-check` from https://github.com/edsrzf/gofmt-git-hook
+locally as a pre-commit hook checks formatting before committing automatically,
+just copy this script to `.git/hooks/pre-commit`.
 
 For each pull request, several different systems run the integration tests on
-Linux, OS X and Windows. We won't merge any code that does not pass all tests
+Linux, macOS and Windows. We won't merge any code that does not pass all tests
 for all systems, so when a tests fails, try to find out what's wrong and fix
 it. If you need help on this, please leave a comment in the pull request, and
 we'll be glad to assist. Having a PR with failing integration tests is nothing
@@ -164,7 +193,7 @@ history and triaging bugs much easier.
 Git commit messages have a very terse summary in the first line of the commit
 message, followed by an empty line, followed by a more verbose description or a
 List of changed things. For examples, please refer to the excellent [How to
-Write a Git Commit Message](http://chris.beams.io/posts/git-commit/).
+Write a Git Commit Message](https://chris.beams.io/posts/git-commit/).
 
 If you change/add multiple different things that aren't related at all, try to
 make several smaller commits. This is much easier to review. Using `git add -p`

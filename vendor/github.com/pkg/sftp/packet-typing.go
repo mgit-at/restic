@@ -12,8 +12,6 @@ type requestPacket interface {
 	id() uint32
 }
 
-type requestChan chan requestPacket
-
 type responsePacket interface {
 	encoding.BinaryMarshaler
 	id() uint32
@@ -77,6 +75,7 @@ func (p sshFxpStatusPacket) id() uint32 { return p.ID }
 func (p sshFxpStatResponse) id() uint32 { return p.ID }
 func (p sshFxpNamePacket) id() uint32   { return p.ID }
 func (p sshFxpHandlePacket) id() uint32 { return p.ID }
+func (p StatVFS) id() uint32            { return p.ID }
 func (p sshFxVersionPacket) id() uint32 { return 0 }
 
 // take raw incoming packet data and build packet objects
@@ -127,7 +126,9 @@ func makePacket(p rxPacket) (requestPacket, error) {
 		return nil, errors.Errorf("unhandled packet type: %s", p.pktType)
 	}
 	if err := pkt.UnmarshalBinary(p.pktBytes); err != nil {
-		return nil, err
+		// Return partially unpacked packet to allow callers to return
+		// error messages appropriately with necessary id() method.
+		return pkt, err
 	}
 	return pkt, nil
 }

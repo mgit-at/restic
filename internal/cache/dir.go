@@ -12,17 +12,21 @@ import (
 
 // xdgCacheDir returns the cache directory according to XDG basedir spec, see
 // http://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
+// unless RESTIC_CACHE_DIR is defined
 func xdgCacheDir() (string, error) {
+	cachedir := os.Getenv("RESTIC_CACHE_DIR")
 	xdgcache := os.Getenv("XDG_CACHE_HOME")
 	home := os.Getenv("HOME")
 
-	if xdgcache != "" {
+	if cachedir != "" {
+		return cachedir, nil
+	} else if xdgcache != "" {
 		return filepath.Join(xdgcache, "restic"), nil
 	} else if home != "" {
 		return filepath.Join(home, ".cache", "restic"), nil
 	}
 
-	return "", errors.New("unable to locate cache directory (XDG_CACHE_HOME and HOME unset)")
+	return "", errors.New("unable to locate cache directory (RESTIC_CACHE_DIR, XDG_CACHE_HOME and HOME unset)")
 }
 
 // windowsCacheDir returns the cache directory for Windows.
@@ -32,7 +36,7 @@ func xdgCacheDir() (string, error) {
 func windowsCacheDir() (string, error) {
 	appdata := os.Getenv("LOCALAPPDATA")
 	if appdata == "" {
-		return "", errors.New("unable to locate cache directory (APPDATA unset)")
+		return "", errors.New("unable to locate cache directory (LOCALAPPDATA unset)")
 	}
 	return filepath.Join(appdata, "restic"), nil
 }
@@ -68,25 +72,31 @@ func DefaultDir() (cachedir string, err error) {
 	return cachedir, nil
 }
 
-func mkdirCacheDir(cachedir string) error {
+// mkdirCacheDir ensures that the cache directory exists. It it didn't, created
+// is set to true.
+func mkdirCacheDir(cachedir string) (created bool, err error) {
+	var newCacheDir bool
+
 	fi, err := fs.Stat(cachedir)
 	if os.IsNotExist(errors.Cause(err)) {
 		err = fs.MkdirAll(cachedir, 0700)
 		if err != nil {
-			return errors.Wrap(err, "MkdirAll")
+			return true, errors.Wrap(err, "MkdirAll")
 		}
 
 		fi, err = fs.Stat(cachedir)
 		debug.Log("create cache dir %v", cachedir)
+
+		newCacheDir = true
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "Stat")
+		return newCacheDir, errors.Wrap(err, "Stat")
 	}
 
 	if !fi.IsDir() {
-		return errors.Errorf("cache dir %v is not a directory", cachedir)
+		return newCacheDir, errors.Errorf("cache dir %v is not a directory", cachedir)
 	}
 
-	return nil
+	return newCacheDir, nil
 }

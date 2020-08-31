@@ -86,7 +86,7 @@ func testRunList(t testing.TB, tpe string, opts GlobalOptions) restic.IDs {
 		globalOptions.stdout = os.Stdout
 	}()
 
-	rtest.OK(t, runList(opts, []string{tpe}))
+	rtest.OK(t, runList(cmdList, opts, []string{tpe}))
 	return parseIDsFromReader(t, buf)
 }
 
@@ -217,6 +217,35 @@ func testRunSnapshots(t testing.TB, gopts GlobalOptions) (newest *Snapshot, snap
 func testRunForget(t testing.TB, gopts GlobalOptions, args ...string) {
 	opts := ForgetOptions{}
 	rtest.OK(t, runForget(opts, gopts, args))
+}
+
+func testRunForgetJSON(t testing.TB, gopts GlobalOptions, args ...string) {
+	buf := bytes.NewBuffer(nil)
+	oldJSON := gopts.JSON
+	gopts.stdout = buf
+	gopts.JSON = true
+	defer func() {
+		gopts.stdout = os.Stdout
+		gopts.JSON = oldJSON
+	}()
+
+	opts := ForgetOptions{
+		DryRun: true,
+		Last:   1,
+	}
+
+	rtest.OK(t, runForget(opts, gopts, args))
+
+	var forgets []*ForgetGroup
+	rtest.OK(t, json.Unmarshal(buf.Bytes(), &forgets))
+
+	rtest.Assert(t, len(forgets) == 1,
+		"Expected 1 snapshot group, got %v", len(forgets))
+	rtest.Assert(t, len(forgets[0].Keep) == 1,
+		"Expected 1 snapshot to be kept, got %v", len(forgets[0].Keep))
+	rtest.Assert(t, len(forgets[0].Remove) == 2,
+		"Expected 2 snapshots to be removed, got %v", len(forgets[0].Remove))
+	return
 }
 
 func testRunPrune(t testing.TB, gopts GlobalOptions) {
@@ -387,23 +416,23 @@ func TestBackupExclude(t *testing.T) {
 	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, opts, env.gopts)
 	snapshots, snapshotID := lastSnapshot(snapshots, loadSnapshotMap(t, env.gopts))
 	files := testRunLs(t, env.gopts, snapshotID)
-	rtest.Assert(t, includes(files, filepath.Join(string(filepath.Separator), "testdata", "foo.tar.gz")),
+	rtest.Assert(t, includes(files, "/testdata/foo.tar.gz"),
 		"expected file %q in first snapshot, but it's not included", "foo.tar.gz")
 
 	opts.Excludes = []string{"*.tar.gz"}
 	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, opts, env.gopts)
 	snapshots, snapshotID = lastSnapshot(snapshots, loadSnapshotMap(t, env.gopts))
 	files = testRunLs(t, env.gopts, snapshotID)
-	rtest.Assert(t, !includes(files, filepath.Join(string(filepath.Separator), "testdata", "foo.tar.gz")),
+	rtest.Assert(t, !includes(files, "/testdata/foo.tar.gz"),
 		"expected file %q not in first snapshot, but it's included", "foo.tar.gz")
 
 	opts.Excludes = []string{"*.tar.gz", "private/secret"}
 	testRunBackup(t, filepath.Dir(env.testdata), []string{"testdata"}, opts, env.gopts)
 	_, snapshotID = lastSnapshot(snapshots, loadSnapshotMap(t, env.gopts))
 	files = testRunLs(t, env.gopts, snapshotID)
-	rtest.Assert(t, !includes(files, filepath.Join(string(filepath.Separator), "testdata", "foo.tar.gz")),
+	rtest.Assert(t, !includes(files, "/testdata/foo.tar.gz"),
 		"expected file %q not in first snapshot, but it's included", "foo.tar.gz")
-	rtest.Assert(t, !includes(files, filepath.Join(string(filepath.Separator), "testdata", "private", "secret", "passwords.txt")),
+	rtest.Assert(t, !includes(files, "/testdata/private/secret/passwords.txt"),
 		"expected file %q not in first snapshot, but it's included", "passwords.txt")
 }
 
@@ -875,9 +904,6 @@ func TestRestoreNoMetadataOnIgnoredIntermediateDirs(t *testing.T) {
 	fi, err := os.Stat(f1)
 	rtest.OK(t, err)
 
-	rtest.Assert(t, fi.ModTime() != time.Unix(0, 0),
-		"meta data of intermediate directory has been restore although it was ignored")
-
 	// restore with filter "*", this should restore meta data on everything.
 	testRunRestoreIncludes(t, env.gopts, filepath.Join(env.base, "restore1"), snapshotID, []string{"*"})
 
@@ -1054,6 +1080,7 @@ func TestPrune(t *testing.T) {
 	rtest.Assert(t, len(snapshotIDs) == 3,
 		"expected 3 snapshot, got %v", snapshotIDs)
 
+	testRunForgetJSON(t, env.gopts)
 	testRunForget(t, env.gopts, firstSnapshot[0].String())
 	testRunPrune(t, env.gopts)
 	testRunCheck(t, env.gopts)

@@ -1,9 +1,9 @@
-|Documentation| |Build Status| |Build status| |Report Card| |Say Thanks| |TestCoverage|
+|Documentation| |Build Status| |Build status| |Report Card| |Say Thanks| |TestCoverage| |Reviewed by Hound|
 
 Introduction
 ------------
 
-restic is a backup program that is fast, efficient and secure.
+restic is a backup program that is fast, efficient and secure. It supports the three major operating systems (Linux, macOS, Windows) and a few smaller ones (FreeBSD, OpenBSD).
 
 For detailed usage and installation instructions check out the `documentation <https://restic.readthedocs.io/en/latest>`__.
 
@@ -29,7 +29,7 @@ and add some data:
 
 .. code-block:: console
 
-    $ restic -r /tmp/backup backup ~/work
+    $ restic --repo /tmp/backup backup ~/work
     enter password for repository:
     scan [/home/user/work]
     scanned 764 directories, 1816 files in 0:00
@@ -111,15 +111,25 @@ License
 Restic is licensed under `BSD 2-Clause License <https://opensource.org/licenses/BSD-2-Clause>`__. You can find the
 complete text in ``LICENSE``.
 
+Sponsorship
+-----------
+
+Backend integration tests for Google Cloud Storage and Microsoft Azure Blob
+Storage are sponsored by `AppsCode <https://appscode.com>`__!
+
+|AppsCode|
+
 .. |Documentation| image:: https://readthedocs.org/projects/restic/badge/?version=latest
    :target: https://restic.readthedocs.io/en/latest/?badge=latest
-.. |Build Status| image:: https://travis-ci.org/restic/restic.svg?branch=master
-   :target: https://travis-ci.org/restic/restic
+.. |Build Status| image:: https://travis-ci.com/restic/restic.svg?branch=master
+   :target: https://travis-ci.com/restic/restic
 .. |Build status| image:: https://ci.appveyor.com/api/projects/status/nuy4lfbgfbytw92q/branch/master?svg=true
    :target: https://ci.appveyor.com/project/fd0/restic/branch/master
 .. |Report Card| image:: https://goreportcard.com/badge/github.com/restic/restic
    :target: https://goreportcard.com/report/github.com/restic/restic
 .. |Say Thanks| image:: https://img.shields.io/badge/Say%20Thanks-!-1EAEDB.svg
    :target: https://saythanks.io/to/restic
-.. |TestCoverage| image:: https://codecov.io/gh/restic/restic/branch/master/graph/badge.svg
-   :target: https://codecov.io/gh/restic/restic
+.. |AppsCode| image:: https://cdn.appscode.com/images/logo/appscode/ac-logo-color.png
+   :target: https://appscode.com
+.. |Reviewed by Hound| image:: https://img.shields.io/badge/Reviewed_by-Hound-8E64B0.svg
+   :target: https://houndci.com

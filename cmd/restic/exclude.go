@@ -60,15 +60,20 @@ func (rc *rejectionCache) Store(dir string, rejected bool) {
 	rc.m[dir] = rejected
 }
 
+// RejectByNameFunc is a function that takes a filename of a
+// file that would be included in the backup. The function returns true if it
+// should be excluded (rejected) from the backup.
+type RejectByNameFunc func(path string) bool
+
 // RejectFunc is a function that takes a filename and os.FileInfo of a
 // file that would be included in the backup. The function returns true if it
 // should be excluded (rejected) from the backup.
 type RejectFunc func(path string, fi os.FileInfo) bool
 
-// rejectByPattern returns a RejectFunc which rejects files that match
+// rejectByPattern returns a RejectByNameFunc which rejects files that match
 // one of the patterns.
-func rejectByPattern(patterns []string) RejectFunc {
-	return func(item string, fi os.FileInfo) bool {
+func rejectByPattern(patterns []string) RejectByNameFunc {
+	return func(item string) bool {
 		matched, _, err := filter.List(patterns, item)
 		if err != nil {
 			Warnf("error for exclude pattern: %v", err)
@@ -83,14 +88,26 @@ func rejectByPattern(patterns []string) RejectFunc {
 	}
 }
 
-// rejectIfPresent returns a RejectFunc which itself returns whether a path
-// should be excluded. The RejectFunc considers a file to be excluded when
+// Same as `rejectByPattern` but case insensitive.
+func rejectByInsensitivePattern(patterns []string) RejectByNameFunc {
+	for index, path := range patterns {
+		patterns[index] = strings.ToLower(path)
+	}
+
+	rejFunc := rejectByPattern(patterns)
+	return func(item string) bool {
+		return rejFunc(strings.ToLower(item))
+	}
+}
+
+// rejectIfPresent returns a RejectByNameFunc which itself returns whether a path
+// should be excluded. The RejectByNameFunc considers a file to be excluded when
 // it resides in a directory with an exclusion file, that is specified by
 // excludeFileSpec in the form "filename[:content]". The returned error is
 // non-nil if the filename component of excludeFileSpec is empty. If rc is
-// non-nil, it is going to be used in the RejectFunc to expedite the evaluation
+// non-nil, it is going to be used in the RejectByNameFunc to expedite the evaluation
 // of a directory based on previous visits.
-func rejectIfPresent(excludeFileSpec string) (RejectFunc, error) {
+func rejectIfPresent(excludeFileSpec string) (RejectByNameFunc, error) {
 	if excludeFileSpec == "" {
 		return nil, errors.New("name for exclusion tagfile is empty")
 	}
@@ -107,7 +124,7 @@ func rejectIfPresent(excludeFileSpec string) (RejectFunc, error) {
 	}
 	debug.Log("using %q as exclusion tagfile", tf)
 	rc := &rejectionCache{}
-	fn := func(filename string, _ os.FileInfo) bool {
+	fn := func(filename string) bool {
 		return isExcludedByFile(filename, tf, tc, rc)
 	}
 	return fn, nil
@@ -185,6 +202,11 @@ func isDirExcludedByFile(dir, tagFilename, header string) bool {
 func gatherDevices(items []string) (deviceMap map[string]uint64, err error) {
 	deviceMap = make(map[string]uint64)
 	for _, item := range items {
+		item, err = filepath.Abs(filepath.Clean(item))
+		if err != nil {
+			return nil, err
+		}
+
 		fi, err := fs.Lstat(item)
 		if err != nil {
 			return nil, err
@@ -215,6 +237,8 @@ func rejectByDevice(samples []string) (RejectFunc, error) {
 			return false
 		}
 
+		item = filepath.Clean(item)
+
 		id, err := fs.DeviceID(fi)
 		if err != nil {
 			// This should never happen because gatherDevices() would have
@@ -222,11 +246,14 @@ func rejectByDevice(samples []string) (RejectFunc, error) {
 			panic(err)
 		}
 
-		for dir := item; dir != ""; dir = filepath.Dir(dir) {
+		for dir := item; ; dir = filepath.Dir(dir) {
 			debug.Log("item %v, test dir %v", item, dir)
 
 			allowedID, ok := allowed[dir]
 			if !ok {
+				if dir == filepath.Dir(dir) {
+					break
+				}
 				continue
 			}
 
@@ -242,11 +269,11 @@ func rejectByDevice(samples []string) (RejectFunc, error) {
 	}, nil
 }
 
-// rejectResticCache returns a RejectFunc that rejects the restic cache
+// rejectResticCache returns a RejectByNameFunc that rejects the restic cache
 // directory (if set).
-func rejectResticCache(repo *repository.Repository) (RejectFunc, error) {
+func rejectResticCache(repo *repository.Repository) (RejectByNameFunc, error) {
 	if repo.Cache == nil {
-		return func(string, os.FileInfo) bool {
+		return func(string) bool {
 			return false
 		}, nil
 	}
@@ -256,7 +283,7 @@ func rejectResticCache(repo *repository.Repository) (RejectFunc, error) {
 		return nil, errors.New("cacheBase is empty string")
 	}
 
-	return func(item string, _ os.FileInfo) bool {
+	return func(item string) bool {
 		if fs.HasPathPrefix(cacheBase, item) {
 			debug.Log("rejecting restic cache directory %v", item)
 			return true

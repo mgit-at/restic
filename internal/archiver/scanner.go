@@ -12,23 +12,21 @@ import (
 // stats concerning the files and folders found. Select is used to decide which
 // items should be included. Error is called when an error occurs.
 type Scanner struct {
-	FS     fs.FS
-	Select SelectFunc
-	Error  ErrorFunc
-	Result func(item string, s ScanStats)
+	FS           fs.FS
+	SelectByName SelectByNameFunc
+	Select       SelectFunc
+	Error        ErrorFunc
+	Result       func(item string, s ScanStats)
 }
 
 // NewScanner initializes a new Scanner.
 func NewScanner(fs fs.FS) *Scanner {
 	return &Scanner{
-		FS: fs,
-		Select: func(item string, fi os.FileInfo) bool {
-			return true
-		},
-		Error: func(item string, fi os.FileInfo, err error) error {
-			return err
-		},
-		Result: func(item string, s ScanStats) {},
+		FS:           fs,
+		SelectByName: func(item string) bool { return true },
+		Select:       func(item string, fi os.FileInfo) bool { return true },
+		Error:        func(item string, fi os.FileInfo, err error) error { return err },
+		Result:       func(item string, s ScanStats) {},
 	}
 }
 
@@ -54,7 +52,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string) error {
 		}
 
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil
 		}
 	}
 
@@ -64,20 +62,21 @@ func (s *Scanner) Scan(ctx context.Context, targets []string) error {
 
 func (s *Scanner) scan(ctx context.Context, stats ScanStats, target string) (ScanStats, error) {
 	if ctx.Err() != nil {
-		return stats, ctx.Err()
+		return stats, nil
 	}
 
+	// exclude files by path before running stat to reduce number of lstat calls
+	if !s.SelectByName(target) {
+		return stats, nil
+	}
+
+	// get file information
 	fi, err := s.FS.Lstat(target)
 	if err != nil {
-		// ignore error if the target is to be excluded anyway
-		if !s.Select(target, nil) {
-			return stats, nil
-		}
-
-		// else return filtered error
 		return stats, s.Error(target, fi, err)
 	}
 
+	// run remaining select functions that require file information
 	if !s.Select(target, fi) {
 		return stats, nil
 	}
@@ -87,10 +86,6 @@ func (s *Scanner) scan(ctx context.Context, stats ScanStats, target string) (Sca
 		stats.Files++
 		stats.Bytes += uint64(fi.Size())
 	case fi.Mode().IsDir():
-		if ctx.Err() != nil {
-			return stats, ctx.Err()
-		}
-
 		names, err := readdirnames(s.FS, target)
 		if err != nil {
 			return stats, s.Error(target, fi, err)

@@ -48,6 +48,14 @@ files in the snapshot. For example, to restore a single file:
 
 This will restore the file ``foo`` to ``/tmp/restore-work/work/foo``.
 
+You can use the command ``restic ls latest`` or ``restic find foo`` to find the
+path to the file within the snapshot. This path you can then pass to
+``--include`` in verbatim to only restore the single file or directory.
+
+There are case insensitive variants of of ``--exclude`` and ``--include`` called
+``--iexclude`` and ``--iinclude``. These options will behave the same way but
+ignore the casing of paths.
+
 Restore using mount
 ===================
 
@@ -61,10 +69,12 @@ command to serve the repository with FUSE:
     $ restic -r /srv/restic-repo mount /mnt/restic
     enter password for repository:
     Now serving /srv/restic-repo at /mnt/restic
-    Don't forget to umount after quitting!
+    When finished, quit with Ctrl-c or umount the mountpoint.
 
 Mounting repositories via FUSE is not possible on OpenBSD, Solaris/illumos
-and Windows.
+and Windows. For Linux, the ``fuse`` kernel module needs to be loaded. For
+FreeBSD, you may need to install FUSE and load the kernel module (``kldload
+fuse``).
 
 Restic supports storage and preservation of hard links. However, since
 hard links exist in the scope of a filesystem by definition, restoring
@@ -81,3 +91,46 @@ the data directly. This can be achieved by using the `dump` command, like this:
 .. code-block:: console
 
     $ restic -r /srv/restic-repo dump latest production.sql | mysql
+
+If you have saved multiple different things into the same repo, the ``latest``
+snapshot may not be the right one. For example, consider the following
+snapshots in a repo:
+
+.. code-block:: console
+
+    $ restic -r /srv/restic-repo snapshots
+    ID        Date                 Host        Tags        Directory
+    ----------------------------------------------------------------------
+    562bfc5e  2018-07-14 20:18:01  mopped                  /home/user/file1
+    bbacb625  2018-07-14 20:18:07  mopped                  /home/other/work
+    e922c858  2018-07-14 20:18:10  mopped                  /home/other/work
+    098db9d5  2018-07-14 20:18:13  mopped                  /production.sql
+    b62f46ec  2018-07-14 20:18:16  mopped                  /home/user/file1
+    1541acae  2018-07-14 20:18:18  mopped                  /home/other/work
+    ----------------------------------------------------------------------
+
+Here, restic would resolve ``latest`` to the snapshot ``1541acae``, which does
+not contain the file we'd like to print at all (``production.sql``).  In this
+case, you can pass restic the snapshot ID of the snapshot you like to restore:
+
+.. code-block:: console
+
+    $ restic -r /srv/restic-repo dump 098db9d5 production.sql | mysql
+
+Or you can pass restic a path that should be used for selecting the latest
+snapshot. The path must match the patch printed in the "Directory" column,
+e.g.:
+
+.. code-block:: console
+
+    $ restic -r /srv/restic-repo dump --path /production.sql latest production.sql | mysql
+
+It is also possible to ``dump`` the contents of a whole folder structure to
+stdout. To retain the information about the files and folders Restic will
+output the contents in the tar format:
+
+.. code-block:: console
+
+    $ restic -r /srv/restic-repo dump /home/other/work latest > restore.tar
+
+

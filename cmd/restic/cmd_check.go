@@ -50,7 +50,7 @@ func init() {
 
 	f := cmdCheck.Flags()
 	f.BoolVar(&checkOptions.ReadData, "read-data", false, "read all data blobs")
-	f.StringVar(&checkOptions.ReadDataSubset, "read-data-subset", "", "read subset of data packs")
+	f.StringVar(&checkOptions.ReadDataSubset, "read-data-subset", "", "read subset n of m data packs (format: `n/m`)")
 	f.BoolVar(&checkOptions.CheckUnused, "check-unused", false, "find unused blobs")
 	f.BoolVar(&checkOptions.WithCache, "with-cache", false, "use the cache")
 }
@@ -67,10 +67,16 @@ func checkFlags(opts CheckOptions) error {
 		if dataSubset[0] == 0 || dataSubset[1] == 0 || dataSubset[0] > dataSubset[1] {
 			return errors.Fatalf("check flag --read-data-subset=n/t values must be positive integers, and n <= t, e.g. --read-data-subset=1/2")
 		}
+		if dataSubset[1] > totalBucketsMax {
+			return errors.Fatalf("check flag --read-data-subset=n/t t must be at most %d", totalBucketsMax)
+		}
 	}
 
 	return nil
 }
+
+// See doReadData in runCheck below for why this is 256.
+const totalBucketsMax = 256
 
 // stringToIntSlice converts string to []uint, using '/' as element separator
 func stringToIntSlice(param string) (split []uint, err error) {
@@ -122,7 +128,8 @@ func newReadProgress(gopts GlobalOptions, todo restic.Stat) *restic.Progress {
 // prepareCheckCache configures a special cache directory for check.
 //
 //  * if --with-cache is specified, the default cache is used
-//  * if the user explicitely requested --no-cache, we don't use any cache
+//  * if the user explicitly requested --no-cache, we don't use any cache
+//  * if the user provides --cache-dir, we use a cache in a temporary sub-directory of the specified directory and the sub-directory is deleted after the check
 //  * by default, we use a cache in a temporary directory that is deleted after the check
 func prepareCheckCache(opts CheckOptions, gopts *GlobalOptions) (cleanup func()) {
 	cleanup = func() {}
@@ -136,8 +143,10 @@ func prepareCheckCache(opts CheckOptions, gopts *GlobalOptions) (cleanup func())
 		return cleanup
 	}
 
+	cachedir := gopts.CacheDir
+
 	// use a cache in a temporary directory
-	tempdir, err := ioutil.TempDir("", "restic-check-cache-")
+	tempdir, err := ioutil.TempDir(cachedir, "restic-check-cache-")
 	if err != nil {
 		// if an error occurs, don't use any cache
 		Warnf("unable to create temporary directory for cache during check, disabling cache: %v\n", err)
@@ -254,6 +263,8 @@ func runCheck(opts CheckOptions, gopts GlobalOptions, args []string) error {
 	doReadData := func(bucket, totalBuckets uint) {
 		packs := restic.IDSet{}
 		for pack := range chkr.GetPacks() {
+			// If we ever check more than the first byte
+			// of pack, update totalBucketsMax.
 			if (uint(pack[0]) % totalBuckets) == (bucket - 1) {
 				packs.Insert(pack)
 			}

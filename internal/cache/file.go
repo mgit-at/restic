@@ -63,6 +63,12 @@ func (c *Cache) Load(h restic.Handle, length int, offset int64) (io.ReadCloser, 
 		return nil, errors.Errorf("cached file %v is truncated, removing", h)
 	}
 
+	if fi.Size() < offset+int64(length) {
+		_ = f.Close()
+		_ = c.Remove(h)
+		return nil, errors.Errorf("cached file %v is too small, removing", h)
+	}
+
 	if offset > 0 {
 		if _, err = f.Seek(offset, io.SeekStart); err != nil {
 			_ = f.Close()
@@ -121,7 +127,8 @@ func (c *Cache) Save(h restic.Handle, rd io.Reader) error {
 	if n <= crypto.Extension {
 		_ = f.Close()
 		_ = c.Remove(h)
-		return errors.Errorf("trying to cache truncated file %v", h)
+		debug.Log("trying to cache truncated file %v, removing", h)
+		return nil
 	}
 
 	if err = f.Close(); err != nil {
@@ -207,9 +214,5 @@ func (c *Cache) Has(h restic.Handle) bool {
 	}
 
 	_, err := fs.Stat(c.filename(h))
-	if err == nil {
-		return true
-	}
-
-	return false
+	return err == nil
 }

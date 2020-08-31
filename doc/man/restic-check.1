@@ -38,7 +38,7 @@ repository and not use a local cache.
 
 .PP
 \fB\-\-read\-data\-subset\fP=""
-    read subset of data packs
+    read subset n of m data packs (format: \fB\fCn/m\fR)
 
 .PP
 \fB\-\-with\-cache\fP[=false]
@@ -48,11 +48,11 @@ repository and not use a local cache.
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
 \fB\-\-cacert\fP=[]
-    path to load root certificates from (default: use system certificates)
+    \fB\fCfile\fR to load root certificates from (default: use system certificates)
 
 .PP
 \fB\-\-cache\-dir\fP=""
-    set the cache directory
+    set the cache directory. (default: use system default cache directory)
 
 .PP
 \fB\-\-cleanup\-cache\fP[=false]
@@ -61,6 +61,10 @@ repository and not use a local cache.
 .PP
 \fB\-\-json\fP[=false]
     set output mode to JSON for commands that support it
+
+.PP
+\fB\-\-key\-hint\fP=""
+    key ID of key to try decrypting first (default: $RESTIC\_KEY\_HINT)
 
 .PP
 \fB\-\-limit\-download\fP=0
@@ -83,6 +87,10 @@ repository and not use a local cache.
     set extended option (\fB\fCkey=value\fR, can be specified multiple times)
 
 .PP
+\fB\-\-password\-command\fP=""
+    specify a shell command to obtain a password (default: $RESTIC\_PASSWORD\_COMMAND)
+
+.PP
 \fB\-p\fP, \fB\-\-password\-file\fP=""
     read the repository password from a file (default: $RESTIC\_PASSWORD\_FILE)
 
@@ -97,6 +105,10 @@ repository and not use a local cache.
 .PP
 \fB\-\-tls\-client\-cert\fP=""
     path to a file containing PEM encoded TLS client certificate and private key
+
+.PP
+\fB\-v\fP, \fB\-\-verbose\fP[=0]
+    be verbose (specify \-\-verbose multiple times or level \fB\fCn\fR)
 
 
 .SH SEE ALSO

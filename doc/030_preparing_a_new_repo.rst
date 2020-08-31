@@ -14,12 +14,25 @@
 Preparing a new repository
 ##########################
 
-The place where your backups will be saved at is called a "repository".
+The place where your backups will be saved is called a "repository".
 This chapter explains how to create ("init") such a repository. The repository
 can be stored locally, or on some remote server or service. We'll first cover
-using a local repository, the remaining sections of this chapter cover all the
+using a local repository; the remaining sections of this chapter cover all the
 other options. You can skip to the next chapter once you've read the relevant
 section here.
+
+For automated backups, restic accepts the repository location in the
+environment variable ``RESTIC_REPOSITORY``. For the password, several options
+exist:
+
+ * Setting the environment variable ``RESTIC_PASSWORD``
+
+ * Specifying the path to a file with the password via the option
+   ``--password-file`` or the environment variable ``RESTIC_PASSWORD_FILE``
+
+ * Configuring a program to be called when the password is needed via the
+   option ``--password-command`` or the environment variable
+   ``RESTIC_PASSWORD_COMMAND``
 
 Local
 *****
@@ -40,11 +53,6 @@ command and enter the same password twice:
 
    Remembering your password is important! If you lose it, you won't be
    able to access data stored in the repository.
-
-For automated backups, restic accepts the repository location in the
-environment variable ``RESTIC_REPOSITORY``. The password can be read
-from a file (via the option ``--password-file`` or the environment variable
-``RESTIC_PASSWORD_FILE``) or the environment variable ``RESTIC_PASSWORD``.
 
 SFTP
 ****
@@ -114,7 +122,17 @@ Last, if you'd like to use an entirely different program to create the
 SFTP connection, you can specify the command to be run with the option
 ``-o sftp.command="foobar"``.
 
+.. note:: Please be aware that sftp servers close connections when no data is
+          received by the client. This can happen when restic is processing huge
+          amounts of unchanged data. To avoid this issue add the following lines 
+          to the client’s .ssh/config file:
 
+::
+
+    ServerAliveInterval 60
+    ServerAliveCountMax 240
+          
+          
 REST Server
 ***********
 
@@ -129,8 +147,8 @@ scheme like this:
     $ restic -r rest:http://host:8000/
 
 Depending on your REST server setup, you can use HTTPS protocol,
-password protection, or multiple repositories. Or any combination of
-those features, as you see fit. TCP/IP port is also configurable. Here
+password protection, multiple repositories or any combination of
+those features. The TCP/IP port is also configurable. Here
 are some more examples:
 
 .. code-block:: console
@@ -143,7 +161,10 @@ If you use TLS, restic will use the system's CA certificates to verify the
 server certificate. When the verification fails, restic refuses to proceed and
 exits with an error. If you have your own self-signed certificate, or a custom
 CA certificate should be used for verification, you can pass restic the
-certificate filename via the ``--cacert`` option.
+certificate filename via the ``--cacert`` option. It will then verify that the
+server's certificate is contained in the file passed to this option, or signed
+by a CA certificate in the file. In this case, the system CA certificates are
+not considered at all.
 
 REST server uses exactly the same directory structure as local backend,
 so you should be able to access it both locally and via HTTP, even
@@ -164,7 +185,7 @@ while creating the bucket.
     $ export AWS_SECRET_ACCESS_KEY=<MY_SECRET_ACCESS_KEY>
 
 You can then easily initialize a repository that uses your Amazon S3 as
-a backend, if the bucket does not exist yet it will be created in the
+a backend. If the bucket does not exist it will be created in the
 default location:
 
 .. code-block:: console
@@ -176,10 +197,11 @@ default location:
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
-It is not possible at the moment to have restic create a new bucket in a
-different location, so you need to create it using a different program.
-Afterwards, the S3 server (``s3.amazonaws.com``) will redirect restic to
-the correct endpoint.
+If needed, you can manually specify the region to use by either setting the
+environment variable ``AWS_DEFAULT_REGION`` or calling restic with an option
+parameter like ``-o s3.region="us-east-1"``. If the region is not specified,
+the default region is used. Afterwards, the S3 server (at least for AWS,
+``s3.amazonaws.com``) will redirect restic to the correct endpoint.
 
 Until version 0.8.0, restic used a default prefix of ``restic``, so the files
 in the bucket were placed in a directory named ``restic``. If you want to
@@ -206,7 +228,7 @@ written in Go and compatible with AWS S3 API.
    on installation and getting started on Minio Client and Minio Server.
 
 You must first setup the following environment variables with the
-credentials of your running Minio Server.
+credentials of your Minio Server.
 
 .. code-block:: console
 
@@ -231,7 +253,7 @@ OpenStack Swift
 Restic can backup data to an OpenStack Swift container. Because Swift supports
 various authentication methods, credentials are passed through environment
 variables. In order to help integration with existing OpenStack installations,
-the naming convention of those variables follows official python swift client:
+the naming convention of those variables follows the official Python Swift client:
 
 .. code-block:: console
 
@@ -257,17 +279,29 @@ the naming convention of those variables follows official python swift client:
    $ export OS_PROJECT_NAME=<MY_PROJECT_NAME>
    $ export OS_PROJECT_DOMAIN_NAME=<MY_PROJECT_DOMAIN_NAME>
 
+   # For keystone v3 application credential authentication (application credential id)
+   $ export OS_AUTH_URL=<MY_AUTH_URL>
+   $ export OS_APPLICATION_CREDENTIAL_ID=<MY_APPLICATION_CREDENTIAL_ID>
+   $ export OS_APPLICATION_CREDENTIAL_SECRET=<MY_APPLICATION_CREDENTIAL_SECRET>
+
+   # For keystone v3 application credential authentication (application credential name)
+   $ export OS_AUTH_URL=<MY_AUTH_URL>
+   $ export OS_USERNAME=<MY_USERNAME>
+   $ export OS_USER_DOMAIN_NAME=<MY_DOMAIN_NAME>
+   $ export OS_APPLICATION_CREDENTIAL_NAME=<MY_APPLICATION_CREDENTIAL_NAME>
+   $ export OS_APPLICATION_CREDENTIAL_SECRET=<MY_APPLICATION_CREDENTIAL_SECRET>
+
    # For authentication based on tokens
    $ export OS_STORAGE_URL=<MY_STORAGE_URL>
    $ export OS_AUTH_TOKEN=<MY_AUTH_TOKEN>
 
 
-Restic should be compatible with `OpenStack RC file
+Restic should be compatible with an `OpenStack RC file
 <https://docs.openstack.org/user-guide/common/cli-set-environment-variables-using-openstack-rc.html>`__
 in most cases.
 
 Once environment variables are set up, a new repository can be created. The
-name of swift container and optional path can be specified. If
+name of the Swift container and optional path can be specified. If
 the container does not exist, it will be created automatically:
 
 .. code-block:: console
@@ -279,7 +313,7 @@ the container does not exist, it will be created automatically:
    Please note that knowledge of your password is required to access the repository.
    Losing your password means that your data is irrecoverably lost.
 
-The policy of new container created by restic can be changed using environment variable:
+The policy of the new container created by restic can be changed using environment variable:
 
 .. code-block:: console
 
@@ -290,16 +324,19 @@ Backblaze B2
 ************
 
 Restic can backup data to any Backblaze B2 bucket. You need to first setup the
-following environment variables with the credentials you obtained when signed
-into your B2 account:
+following environment variables with the credentials you can find in the
+dashboard on the "Buckets" page when signed into your B2 account:
 
 .. code-block:: console
 
-    $ export B2_ACCOUNT_ID=<MY_ACCOUNT_ID>
-    $ export B2_ACCOUNT_KEY=<MY_SECRET_ACCOUNT_KEY>
+    $ export B2_ACCOUNT_ID=<MY_APPLICATION_KEY_ID>
+    $ export B2_ACCOUNT_KEY=<MY_APPLICATION_KEY>
 
-You can then easily initialize a repository stored at Backblaze B2. If the
-bucket does not exist yet, it will be created:
+.. note:: As of version 0.9.2, restic supports both master and non-master `application keys <https://www.backblaze.com/b2/docs/application_keys.html>`__. If using a non-master application key, ensure that it is created with at least **read and write** access to the B2 bucket. On earlier versions of restic, a master application key is required.
+
+You can then initialize a repository stored at Backblaze B2. If the
+bucket does not exist yet and the credentials you passed to restic have the
+privilege to create buckets, it will be created automatically:
 
 .. code-block:: console
 
@@ -310,8 +347,10 @@ bucket does not exist yet, it will be created:
     Please note that knowledge of your password is required to access the repository.
     Losing your password means that your data is irrecoverably lost.
 
+Note that the bucket name must be unique across all of B2.
+
 The number of concurrent connections to the B2 service can be set with the ``-o
-b2.connections=10``. By default, at most five parallel connections are
+b2.connections=10`` switch. By default, at most five parallel connections are
 established.
 
 Microsoft Azure Blob Storage
@@ -338,15 +377,13 @@ root path like this:
     [...]
 
 The number of concurrent connections to the Azure Blob Storage service can be set with the
-``-o azure.connections=10``. By default, at most five parallel connections are
+``-o azure.connections=10`` switch. By default, at most five parallel connections are
 established.
 
 Google Cloud Storage
 ********************
 
-Restic supports Google Cloud Storage as a backend.
-
-Restic connects to Google Cloud Storage via a `service account`_.
+Restic supports Google Cloud Storage as a backend and connects via a `service account`_.
 
 For normal restic operation, the service account must have the
 ``storage.objects.{create,delete,get,list}`` permissions for the bucket. These
@@ -366,10 +403,9 @@ key file and the project ID as follows:
     $ export GOOGLE_PROJECT_ID=123123123123
     $ export GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gs-secret-restic-key.json
 
-Restic uses  Google's client library to generate [default authentication
-material](https://developers.google.com/identity/protocols/application-default-credentials),
+Restic uses  Google's client library to generate `default authentication material`_,
 which means if you're running in Google Container Engine or are otherwise
-located on an instance with default service accounts then these should work out
+located on an instance with default service accounts then these should work out of 
 the box.
 
 Once authenticated, you can use the ``gs:`` backend type to create a new
@@ -385,11 +421,12 @@ repository in the bucket ``foo`` at the root path:
     [...]
 
 The number of concurrent connections to the GCS service can be set with the
-``-o gs.connections=10``. By default, at most five parallel connections are
+``-o gs.connections=10`` switch. By default, at most five parallel connections are
 established.
 
 .. _service account: https://cloud.google.com/storage/docs/authentication#service_accounts
 .. _create a service account key: https://cloud.google.com/storage/docs/authentication#generating-a-private-key
+.. _default authentication material: https://developers.google.com/identity/protocols/application-default-credentials
 
 Other Services via rclone
 *************************
@@ -503,10 +540,10 @@ At the moment, restic only supports the default Windows console
 interaction. If you use emulation environments like
 `MSYS2 <https://msys2.github.io/>`__ or
 `Cygwin <https://www.cygwin.com/>`__, which use terminals like
-``Mintty`` or ``rxvt``, you may get a password error:
+``Mintty`` or ``rxvt``, you may get a password error.
 
 You can workaround this by using a special tool called ``winpty`` (look
-`here <https://sourceforge.net/p/msys2/wiki/Porting/>`__ and
+`here <https://github.com/msys2/msys2/wiki/Porting>`__ and
 `here <https://github.com/rprichard/winpty>`__ for detail information).
 On MSYS2, you can install ``winpty`` as follows:
 

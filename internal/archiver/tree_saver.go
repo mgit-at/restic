@@ -2,10 +2,10 @@ package archiver
 
 import (
 	"context"
-	"sync"
 
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/restic"
+	tomb "gopkg.in/tomb.v2"
 )
 
 // FutureTree is returned by Save and will return the data once it
@@ -15,29 +15,26 @@ type FutureTree struct {
 	res saveTreeResponse
 }
 
-func (s *FutureTree) wait() {
-	res, ok := <-s.ch
-	if ok {
-		s.res = res
+// Wait blocks until the data has been received or ctx is cancelled.
+func (s *FutureTree) Wait(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case res, ok := <-s.ch:
+		if ok {
+			s.res = res
+		}
 	}
 }
 
-// Node returns the node once it is available.
+// Node returns the node.
 func (s *FutureTree) Node() *restic.Node {
-	s.wait()
 	return s.res.node
 }
 
-// Stats returns the stats for the file once they are available.
+// Stats returns the stats for the file.
 func (s *FutureTree) Stats() ItemStats {
-	s.wait()
 	return s.res.stats
-}
-
-// Err returns the error in case an error occurred.
-func (s *FutureTree) Err() error {
-	s.wait()
-	return s.res.err
 }
 
 // TreeSaver concurrently saves incoming trees to the repo.
@@ -45,24 +42,26 @@ type TreeSaver struct {
 	saveTree func(context.Context, *restic.Tree) (restic.ID, ItemStats, error)
 	errFn    ErrorFunc
 
-	ch chan<- saveTreeJob
-	wg sync.WaitGroup
+	ch   chan<- saveTreeJob
+	done <-chan struct{}
 }
 
 // NewTreeSaver returns a new tree saver. A worker pool with treeWorkers is
 // started, it is stopped when ctx is cancelled.
-func NewTreeSaver(ctx context.Context, treeWorkers uint, saveTree func(context.Context, *restic.Tree) (restic.ID, ItemStats, error), errFn ErrorFunc) *TreeSaver {
+func NewTreeSaver(ctx context.Context, t *tomb.Tomb, treeWorkers uint, saveTree func(context.Context, *restic.Tree) (restic.ID, ItemStats, error), errFn ErrorFunc) *TreeSaver {
 	ch := make(chan saveTreeJob)
 
 	s := &TreeSaver{
 		ch:       ch,
+		done:     t.Dying(),
 		saveTree: saveTree,
 		errFn:    errFn,
 	}
 
 	for i := uint(0); i < treeWorkers; i++ {
-		s.wg.Add(1)
-		go s.worker(ctx, &s.wg, ch)
+		t.Go(func() error {
+			return s.worker(t.Context(ctx), ch)
+		})
 	}
 
 	return s
@@ -71,11 +70,22 @@ func NewTreeSaver(ctx context.Context, treeWorkers uint, saveTree func(context.C
 // Save stores the dir d and returns the data once it has been completed.
 func (s *TreeSaver) Save(ctx context.Context, snPath string, node *restic.Node, nodes []FutureNode) FutureTree {
 	ch := make(chan saveTreeResponse, 1)
-	s.ch <- saveTreeJob{
+	job := saveTreeJob{
 		snPath: snPath,
 		node:   node,
 		nodes:  nodes,
 		ch:     ch,
+	}
+	select {
+	case s.ch <- job:
+	case <-s.done:
+		debug.Log("not saving tree, TreeSaver is done")
+		close(ch)
+		return FutureTree{ch: ch}
+	case <-ctx.Done():
+		debug.Log("not saving tree, context is cancelled")
+		close(ch)
+		return FutureTree{ch: ch}
 	}
 
 	return FutureTree{ch: ch}
@@ -91,7 +101,6 @@ type saveTreeJob struct {
 type saveTreeResponse struct {
 	node  *restic.Node
 	stats ItemStats
-	err   error
 }
 
 // save stores the nodes as a tree in the repo.
@@ -137,21 +146,25 @@ func (s *TreeSaver) save(ctx context.Context, snPath string, node *restic.Node, 
 	return node, stats, nil
 }
 
-func (s *TreeSaver) worker(ctx context.Context, wg *sync.WaitGroup, jobs <-chan saveTreeJob) {
-	defer wg.Done()
+func (s *TreeSaver) worker(ctx context.Context, jobs <-chan saveTreeJob) error {
 	for {
 		var job saveTreeJob
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case job = <-jobs:
 		}
 
 		node, stats, err := s.save(ctx, job.snPath, job.node, job.nodes)
+		if err != nil {
+			debug.Log("error saving tree blob: %v", err)
+			close(job.ch)
+			return err
+		}
+
 		job.ch <- saveTreeResponse{
 			node:  node,
 			stats: stats,
-			err:   err,
 		}
 		close(job.ch)
 	}

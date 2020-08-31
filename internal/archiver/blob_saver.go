@@ -4,7 +4,9 @@ import (
 	"context"
 	"sync"
 
+	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/restic"
+	tomb "gopkg.in/tomb.v2"
 )
 
 // Saver allows saving a blob.
@@ -20,23 +22,25 @@ type BlobSaver struct {
 	m          sync.Mutex
 	knownBlobs restic.BlobSet
 
-	ch chan<- saveBlobJob
-	wg sync.WaitGroup
+	ch   chan<- saveBlobJob
+	done <-chan struct{}
 }
 
 // NewBlobSaver returns a new blob. A worker pool is started, it is stopped
 // when ctx is cancelled.
-func NewBlobSaver(ctx context.Context, repo Saver, workers uint) *BlobSaver {
+func NewBlobSaver(ctx context.Context, t *tomb.Tomb, repo Saver, workers uint) *BlobSaver {
 	ch := make(chan saveBlobJob)
 	s := &BlobSaver{
 		repo:       repo,
 		knownBlobs: restic.NewBlobSet(),
 		ch:         ch,
+		done:       t.Dying(),
 	}
 
 	for i := uint(0); i < workers; i++ {
-		s.wg.Add(1)
-		go s.worker(ctx, &s.wg, ch)
+		t.Go(func() error {
+			return s.worker(t.Context(ctx), ch)
+		})
 	}
 
 	return s
@@ -47,7 +51,17 @@ func NewBlobSaver(ctx context.Context, repo Saver, workers uint) *BlobSaver {
 // previously unknown.
 func (s *BlobSaver) Save(ctx context.Context, t restic.BlobType, buf *Buffer) FutureBlob {
 	ch := make(chan saveBlobResponse, 1)
-	s.ch <- saveBlobJob{BlobType: t, buf: buf, ch: ch}
+	select {
+	case s.ch <- saveBlobJob{BlobType: t, buf: buf, ch: ch}:
+	case <-s.done:
+		debug.Log("not sending job, BlobSaver is done")
+		close(ch)
+		return FutureBlob{ch: ch}
+	case <-ctx.Done():
+		debug.Log("not sending job, context is cancelled")
+		close(ch)
+		return FutureBlob{ch: ch}
+	}
 
 	return FutureBlob{ch: ch, length: len(buf.Data)}
 }
@@ -59,29 +73,26 @@ type FutureBlob struct {
 	res    saveBlobResponse
 }
 
-func (s *FutureBlob) wait() {
-	res, ok := <-s.ch
-	if ok {
-		s.res = res
+// Wait blocks until the result is available or the context is cancelled.
+func (s *FutureBlob) Wait(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case res, ok := <-s.ch:
+		if ok {
+			s.res = res
+		}
 	}
 }
 
 // ID returns the ID of the blob after it has been saved.
 func (s *FutureBlob) ID() restic.ID {
-	s.wait()
 	return s.res.id
 }
 
 // Known returns whether or not the blob was already known.
 func (s *FutureBlob) Known() bool {
-	s.wait()
 	return s.res.known
-}
-
-// Err returns the error which may have occurred during save.
-func (s *FutureBlob) Err() error {
-	s.wait()
-	return s.res.err
 }
 
 // Length returns the length of the blob.
@@ -98,10 +109,9 @@ type saveBlobJob struct {
 type saveBlobResponse struct {
 	id    restic.ID
 	known bool
-	err   error
 }
 
-func (s *BlobSaver) saveBlob(ctx context.Context, t restic.BlobType, buf []byte) saveBlobResponse {
+func (s *BlobSaver) saveBlob(ctx context.Context, t restic.BlobType, buf []byte) (saveBlobResponse, error) {
 	id := restic.Hash(buf)
 	h := restic.BlobHandle{ID: id, Type: t}
 
@@ -121,7 +131,7 @@ func (s *BlobSaver) saveBlob(ctx context.Context, t restic.BlobType, buf []byte)
 		return saveBlobResponse{
 			id:    id,
 			known: true,
-		}
+		}, nil
 	}
 
 	// check if the repo knows this blob
@@ -129,29 +139,37 @@ func (s *BlobSaver) saveBlob(ctx context.Context, t restic.BlobType, buf []byte)
 		return saveBlobResponse{
 			id:    id,
 			known: true,
-		}
+		}, nil
 	}
 
 	// otherwise we're responsible for saving it
 	_, err := s.repo.SaveBlob(ctx, t, buf, id)
+	if err != nil {
+		return saveBlobResponse{}, err
+	}
+
 	return saveBlobResponse{
 		id:    id,
 		known: false,
-		err:   err,
-	}
+	}, nil
 }
 
-func (s *BlobSaver) worker(ctx context.Context, wg *sync.WaitGroup, jobs <-chan saveBlobJob) {
-	defer wg.Done()
+func (s *BlobSaver) worker(ctx context.Context, jobs <-chan saveBlobJob) error {
 	for {
 		var job saveBlobJob
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case job = <-jobs:
 		}
 
-		job.ch <- s.saveBlob(ctx, job.BlobType, job.buf.Data)
+		res, err := s.saveBlob(ctx, job.BlobType, job.buf.Data)
+		if err != nil {
+			debug.Log("saveBlob returned error, exiting: %v", err)
+			close(job.ch)
+			return err
+		}
+		job.ch <- res
 		close(job.ch)
 		job.buf.Release()
 	}

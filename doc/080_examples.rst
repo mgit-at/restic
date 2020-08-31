@@ -247,8 +247,13 @@ restic is now ready to be used with AWS S3. Try to create a backup:
    ----------------------------------------------------------------------
    10fdbace  2017-03-26 16:41:50  blackbox                /home/philip/restic-demo/test.bin
 
-A snapshot was created and stored in the S3 bucket. This snapshot may now be
-restored:
+A snapshot was created and stored in the S3 bucket. By default backups to AWS S3 will use the ``STANDARD`` storage class. Available storage classes include ``STANDARD``, ``STANDARD_IA``, ``ONEZONE_IA``, ``INTELLIGENT_TIERING``, and ``REDUCED_REDUNDANCY``. A different storage class could have been specified in the above command by using ``-o`` or ``--option``:
+
+.. code-block:: console
+
+  $ ./restic backup -o s3.storageclass=REDUCED_REDUNDANCY test.bin
+
+This snapshot may now be restored:
 
 .. code-block:: console
 
@@ -312,7 +317,7 @@ directory.
 .. code-block:: console
 
    root@a3e580b6369d:/# mkdir ~restic/bin
-   root@a3e580b6369d:/# curl -L https://github.com/restic/restic/releases/download/v0.8.0/restic_0.8.0_linux_amd64.bz2 | bunzip2 > ~restic/bin/restic
+   root@a3e580b6369d:/# curl -L https://github.com/restic/restic/releases/download/v0.9.1/restic_0.9.1_linux_amd64.bz2 | bunzip2 > ~restic/bin/restic
 
 Before we assign any special capability to the restic binary we
 restrict its permissions so that only root and the newly created
@@ -338,5 +343,5 @@ system.
 
 .. code-block:: console
 
-   root@a3e580b6369d:/# sudo -u restic /opt/restic/bin/restic --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} -r /tmp backup /
+   root@a3e580b6369d:/# sudo -u restic /home/restic/bin/restic --exclude={/dev,/media,/mnt,/proc,/run,/sys,/tmp,/var/tmp} -r /tmp backup /
 

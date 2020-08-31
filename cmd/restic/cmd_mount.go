@@ -1,3 +1,4 @@
+// +build !netbsd
 // +build !openbsd
 // +build !solaris
 // +build !windows
@@ -52,13 +53,14 @@ For details please see the documentation for time.Format() at:
 
 // MountOptions collects all options for the mount command.
 type MountOptions struct {
-	OwnerRoot        bool
-	AllowRoot        bool
-	AllowOther       bool
-	Host             string
-	Tags             restic.TagLists
-	Paths            []string
-	SnapshotTemplate string
+	OwnerRoot            bool
+	AllowRoot            bool
+	AllowOther           bool
+	NoDefaultPermissions bool
+	Host                 string
+	Tags                 restic.TagLists
+	Paths                []string
+	SnapshotTemplate     string
 }
 
 var mountOptions MountOptions
@@ -70,6 +72,7 @@ func init() {
 	mountFlags.BoolVar(&mountOptions.OwnerRoot, "owner-root", false, "use 'root' as the owner of files and dirs")
 	mountFlags.BoolVar(&mountOptions.AllowRoot, "allow-root", false, "allow root user to access the data in the mounted directory")
 	mountFlags.BoolVar(&mountOptions.AllowOther, "allow-other", false, "allow other users to access the data in the mounted directory")
+	mountFlags.BoolVar(&mountOptions.NoDefaultPermissions, "no-default-permissions", false, "for 'allow-other', ignore Unix permissions and allow users to read all snapshot files")
 
 	mountFlags.StringVarP(&mountOptions.Host, "host", "H", "", `only consider snapshots for this host`)
 	mountFlags.Var(&mountOptions.Tags, "tag", "only consider snapshots which include this `taglist`")
@@ -117,6 +120,11 @@ func mount(opts MountOptions, gopts GlobalOptions, mountpoint string) error {
 
 	if opts.AllowOther {
 		mountOptions = append(mountOptions, systemFuse.AllowOther())
+
+		// let the kernel check permissions unless it is explicitly disabled
+		if !opts.NoDefaultPermissions {
+			mountOptions = append(mountOptions, systemFuse.DefaultPermissions())
+		}
 	}
 
 	c, err := systemFuse.Mount(mountpoint, mountOptions...)
@@ -141,7 +149,7 @@ func mount(opts MountOptions, gopts GlobalOptions, mountpoint string) error {
 	}
 
 	Printf("Now serving the repository at %s\n", mountpoint)
-	Printf("Don't forget to umount after quitting!\n")
+	Printf("When finished, quit with Ctrl-c or umount the mountpoint.\n")
 
 	debug.Log("serving mount at %v", mountpoint)
 	err = fs.Serve(c, root)

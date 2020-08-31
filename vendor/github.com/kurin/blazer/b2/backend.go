@@ -1,4 +1,4 @@
-// Copyright 2016, Google
+// Copyright 2016, the Blazer authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,21 +28,25 @@ type beRootInterface interface {
 	reauth(error) bool
 	transient(error) bool
 	reupload(error) bool
-	authorizeAccount(context.Context, string, string, ...ClientOption) error
+	authorizeAccount(context.Context, string, string, clientOptions) error
 	reauthorizeAccount(context.Context) error
 	createBucket(ctx context.Context, name, btype string, info map[string]string, rules []LifecycleRule) (beBucketInterface, error)
 	listBuckets(context.Context) ([]beBucketInterface, error)
+	createKey(context.Context, string, []string, time.Duration, string, string) (beKeyInterface, error)
+	listKeys(context.Context, int, string) ([]beKeyInterface, string, error)
 }
 
 type beRoot struct {
 	account, key string
 	b2i          b2RootInterface
+	options      clientOptions
 }
 
 type beBucketInterface interface {
 	name() string
 	btype() BucketType
 	attrs() *BucketAttrs
+	id() string
 	updateBucket(context.Context, *BucketAttrs) error
 	deleteBucket(context.Context) error
 	getUploadURL(context.Context) (beURLInterface, error)
@@ -52,7 +56,7 @@ type beBucketInterface interface {
 	listUnfinishedLargeFiles(context.Context, int, string) ([]beFileInterface, string, error)
 	downloadFileByName(context.Context, string, int64, int64) (beFileReaderInterface, error)
 	hideFile(context.Context, string) (beFileInterface, error)
-	getDownloadAuthorization(context.Context, string, time.Duration) (string, error)
+	getDownloadAuthorization(context.Context, string, time.Duration, string) (string, error)
 	baseURL() string
 	file(string, string) beFileInterface
 }
@@ -91,6 +95,7 @@ type beFile struct {
 type beLargeFileInterface interface {
 	finishLargeFile(context.Context) (beFileInterface, error)
 	getUploadPartURL(context.Context) (beFileChunkInterface, error)
+	cancel(context.Context) error
 }
 
 type beLargeFile struct {
@@ -144,25 +149,40 @@ type beFileInfo struct {
 	stamp  time.Time
 }
 
+type beKeyInterface interface {
+	del(context.Context) error
+	caps() []string
+	name() string
+	expires() time.Time
+	secret() string
+	id() string
+}
+
+type beKey struct {
+	b2i beRootInterface
+	k   b2KeyInterface
+}
+
 func (r *beRoot) backoff(err error) time.Duration { return r.b2i.backoff(err) }
 func (r *beRoot) reauth(err error) bool           { return r.b2i.reauth(err) }
 func (r *beRoot) reupload(err error) bool         { return r.b2i.reupload(err) }
 func (r *beRoot) transient(err error) bool        { return r.b2i.transient(err) }
 
-func (r *beRoot) authorizeAccount(ctx context.Context, account, key string, opts ...ClientOption) error {
+func (r *beRoot) authorizeAccount(ctx context.Context, account, key string, c clientOptions) error {
 	f := func() error {
-		if err := r.b2i.authorizeAccount(ctx, account, key, opts...); err != nil {
+		if err := r.b2i.authorizeAccount(ctx, account, key, c); err != nil {
 			return err
 		}
 		r.account = account
 		r.key = key
+		r.options = c
 		return nil
 	}
 	return withBackoff(ctx, r, f)
 }
 
 func (r *beRoot) reauthorizeAccount(ctx context.Context) error {
-	return r.authorizeAccount(ctx, r.account, r.key)
+	return r.authorizeAccount(ctx, r.account, r.key, r.options)
 }
 
 func (r *beRoot) createBucket(ctx context.Context, name, btype string, info map[string]string, rules []LifecycleRule) (beBucketInterface, error) {
@@ -211,17 +231,58 @@ func (r *beRoot) listBuckets(ctx context.Context) ([]beBucketInterface, error) {
 	return buckets, nil
 }
 
-func (b *beBucket) name() string {
-	return b.b2bucket.name()
+func (r *beRoot) createKey(ctx context.Context, name string, caps []string, valid time.Duration, bucketID string, prefix string) (beKeyInterface, error) {
+	var k *beKey
+	f := func() error {
+		g := func() error {
+			got, err := r.b2i.createKey(ctx, name, caps, valid, bucketID, prefix)
+			if err != nil {
+				return err
+			}
+			k = &beKey{
+				b2i: r,
+				k:   got,
+			}
+			return nil
+		}
+		return withReauth(ctx, r, g)
+	}
+	if err := withBackoff(ctx, r, f); err != nil {
+		return nil, err
+	}
+	return k, nil
 }
 
-func (b *beBucket) btype() BucketType {
-	return BucketType(b.b2bucket.btype())
+func (r *beRoot) listKeys(ctx context.Context, max int, next string) ([]beKeyInterface, string, error) {
+	var keys []beKeyInterface
+	var cur string
+	f := func() error {
+		g := func() error {
+			got, n, err := r.b2i.listKeys(ctx, max, next)
+			if err != nil {
+				return err
+			}
+			cur = n
+			for _, g := range got {
+				keys = append(keys, &beKey{
+					b2i: r,
+					k:   g,
+				})
+			}
+			return nil
+		}
+		return withReauth(ctx, r, g)
+	}
+	if err := withBackoff(ctx, r, f); err != nil {
+		return nil, "", err
+	}
+	return keys, cur, nil
 }
 
-func (b *beBucket) attrs() *BucketAttrs {
-	return b.b2bucket.attrs()
-}
+func (b *beBucket) name() string        { return b.b2bucket.name() }
+func (b *beBucket) btype() BucketType   { return BucketType(b.b2bucket.btype()) }
+func (b *beBucket) attrs() *BucketAttrs { return b.b2bucket.attrs() }
+func (b *beBucket) id() string          { return b.b2bucket.id() }
 
 func (b *beBucket) updateBucket(ctx context.Context, attrs *BucketAttrs) error {
 	f := func() error {
@@ -410,11 +471,11 @@ func (b *beBucket) hideFile(ctx context.Context, name string) (beFileInterface, 
 	return file, nil
 }
 
-func (b *beBucket) getDownloadAuthorization(ctx context.Context, p string, v time.Duration) (string, error) {
+func (b *beBucket) getDownloadAuthorization(ctx context.Context, p string, v time.Duration, s string) (string, error) {
 	var tok string
 	f := func() error {
 		g := func() error {
-			t, err := b.b2bucket.getDownloadAuthorization(ctx, p, v)
+			t, err := b.b2bucket.getDownloadAuthorization(ctx, p, v, s)
 			if err != nil {
 				return err
 			}
@@ -594,6 +655,16 @@ func (b *beLargeFile) finishLargeFile(ctx context.Context) (beFileInterface, err
 	return file, nil
 }
 
+func (b *beLargeFile) cancel(ctx context.Context) error {
+	f := func() error {
+		g := func() error {
+			return b.b2largeFile.cancel(ctx)
+		}
+		return withReauth(ctx, b.ri, g)
+	}
+	return withBackoff(ctx, b.ri, f)
+}
+
 func (b *beFileChunk) reload(ctx context.Context) error {
 	f := func() error {
 		g := func() error {
@@ -647,6 +718,13 @@ func (b *beFilePart) number() int  { return b.b2filePart.number() }
 func (b *beFilePart) sha1() string { return b.b2filePart.sha1() }
 func (b *beFilePart) size() int64  { return b.b2filePart.size() }
 
+func (b *beKey) del(ctx context.Context) error { return b.k.del(ctx) }
+func (b *beKey) caps() []string                { return b.k.caps() }
+func (b *beKey) name() string                  { return b.k.name() }
+func (b *beKey) expires() time.Time            { return b.k.expires() }
+func (b *beKey) secret() string                { return b.k.secret() }
+func (b *beKey) id() string                    { return b.k.id() }
+
 func jitter(d time.Duration) time.Duration {
 	f := float64(d)
 	f /= 50
@@ -655,8 +733,8 @@ func jitter(d time.Duration) time.Duration {
 }
 
 func getBackoff(d time.Duration) time.Duration {
-	if d > 15*time.Second {
-		return d + jitter(d)
+	if d > 30*time.Second {
+		return 30*time.Second + jitter(d)
 	}
 	return d*2 + jitter(d*2)
 }

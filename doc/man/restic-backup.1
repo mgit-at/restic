@@ -26,7 +26,8 @@ given as the arguments.
 
 .PP
 \fB\-\-exclude\-caches\fP[=false]
-    excludes cache directories that are marked with a CACHEDIR.TAG file
+    excludes cache directories that are marked with a CACHEDIR.TAG file. See 
+\[la]http://bford.info/cachedir/spec.html\[ra] for the Cache Directory Tagging Standard
 
 .PP
 \fB\-\-exclude\-file\fP=[]
@@ -37,8 +38,8 @@ given as the arguments.
     takes filename[:header], exclude contents of directories containing filename (except filename itself) if header of that file is as provided (can be specified multiple times)
 
 .PP
-\fB\-\-files\-from\fP=""
-    read the files to backup from file (can be combined with file args)
+\fB\-\-files\-from\fP=[]
+    read the files to backup from file (can be combined with file args/can be specified multiple times)
 
 .PP
 \fB\-f\fP, \fB\-\-force\fP[=false]
@@ -49,8 +50,16 @@ given as the arguments.
     help for backup
 
 .PP
-\fB\-\-hostname\fP=""
+\fB\-H\fP, \fB\-\-host\fP=""
     set the \fB\fChostname\fR for the snapshot manually. To prevent an expensive rescan use the "parent" flag
+
+.PP
+\fB\-\-iexclude\fP=[]
+    same as \fB\fC\-\-exclude\fR but ignores the casing of filenames
+
+.PP
+\fB\-\-ignore\-inode\fP[=false]
+    ignore inode number changes when checking for modified files
 
 .PP
 \fB\-x\fP, \fB\-\-one\-file\-system\fP[=false]
@@ -84,11 +93,11 @@ given as the arguments.
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 .PP
 \fB\-\-cacert\fP=[]
-    path to load root certificates from (default: use system certificates)
+    \fB\fCfile\fR to load root certificates from (default: use system certificates)
 
 .PP
 \fB\-\-cache\-dir\fP=""
-    set the cache directory
+    set the cache directory. (default: use system default cache directory)
 
 .PP
 \fB\-\-cleanup\-cache\fP[=false]
@@ -97,6 +106,10 @@ given as the arguments.
 .PP
 \fB\-\-json\fP[=false]
     set output mode to JSON for commands that support it
+
+.PP
+\fB\-\-key\-hint\fP=""
+    key ID of key to try decrypting first (default: $RESTIC\_KEY\_HINT)
 
 .PP
 \fB\-\-limit\-download\fP=0
@@ -119,6 +132,10 @@ given as the arguments.
     set extended option (\fB\fCkey=value\fR, can be specified multiple times)
 
 .PP
+\fB\-\-password\-command\fP=""
+    specify a shell command to obtain a password (default: $RESTIC\_PASSWORD\_COMMAND)
+
+.PP
 \fB\-p\fP, \fB\-\-password\-file\fP=""
     read the repository password from a file (default: $RESTIC\_PASSWORD\_FILE)
 
@@ -133,6 +150,10 @@ given as the arguments.
 .PP
 \fB\-\-tls\-client\-cert\fP=""
     path to a file containing PEM encoded TLS client certificate and private key
+
+.PP
+\fB\-v\fP, \fB\-\-verbose\fP[=0]
+    be verbose (specify \-\-verbose multiple times or level \fB\fCn\fR)
 
 
 .SH SEE ALSO

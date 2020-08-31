@@ -8,7 +8,7 @@ import (
 
 // ErrNoIDPrefixFound is returned by Find() when no ID for the given prefix
 // could be found.
-var ErrNoIDPrefixFound = errors.New("no ID found")
+var ErrNoIDPrefixFound = errors.New("no matching ID found")
 
 // ErrMultipleIDMatches is returned by Find() when multiple IDs with the given
 // prefix are found.
@@ -24,7 +24,7 @@ func Find(be Lister, t FileType, prefix string) (string, error) {
 	defer cancel()
 
 	err := be.List(ctx, t, func(fi FileInfo) error {
-		if prefix == fi.Name[:len(prefix)] {
+		if len(fi.Name) >= len(prefix) && prefix == fi.Name[:len(prefix)] {
 			if match == "" {
 				match = fi.Name
 			} else {
