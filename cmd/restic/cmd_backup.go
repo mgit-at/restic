@@ -531,14 +531,7 @@ func runBackup(ctx context.Context, opts BackupOptions, gopts global.Options, te
 		printer.P("open repository")
 	}
 
-	var repo *repository.Repository
-	var unlock func()
-	if gopts.NoLock && !opts.DryRun {
-		printer.E("Warning: --no-lock is set, the repository is not locked. Running prune or forget --prune concurrently may lead to data loss!")
-		ctx, repo, unlock, err = openWithoutLock(ctx, gopts, printer)
-	} else {
-		ctx, repo, unlock, err = openWithAppendLock(ctx, gopts, opts.DryRun, printer)
-	}
+	ctx, repo, unlock, err := openWithAppendLockOrNoLock(ctx, gopts, opts.DryRun, printer)
 	if err != nil {
 		return err
 	}

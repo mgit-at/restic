@@ -122,7 +122,7 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 	}
 	defer unlock()
 
-	ctx, dstRepo, unlock, err := openWithAppendLock(ctx, secondaryGopts, false, printer)
+	ctx, dstRepo, unlock, err := openWithAppendLockOrNoLock(ctx, secondaryGopts, false, printer)
 	if err != nil {
 		return err
 	}

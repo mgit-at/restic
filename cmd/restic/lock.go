@@ -62,3 +62,14 @@ func openWithoutLock(ctx context.Context, gopts global.Options, printer progress
 	}
 	return ctx, repo, func() {}, nil
 }
+
+// openWithAppendLockOrNoLock behaves like openWithAppendLock, unless --no-lock
+// is set. Then the repository is opened writable but without a lock, which is
+// required for write-once storage that does not allow deleting the lock file.
+func openWithAppendLockOrNoLock(ctx context.Context, gopts global.Options, dryRun bool, printer progress.Printer) (context.Context, *repository.Repository, func(), error) {
+	if gopts.NoLock && !dryRun {
+		printer.E("Warning: --no-lock is set, the repository is not locked. Running prune or forget --prune concurrently may lead to data loss!")
+		return openWithoutLock(ctx, gopts, printer)
+	}
+	return openWithAppendLock(ctx, gopts, dryRun, printer)
+}
