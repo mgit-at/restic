@@ -50,3 +50,15 @@ func openWithAppendLock(ctx context.Context, gopts global.Options, dryRun bool, 
 func openWithExclusiveLock(ctx context.Context, gopts global.Options, dryRun bool, printer progress.Printer) (context.Context, *repository.Repository, func(), error) {
 	return internalOpenWithLocked(ctx, gopts, dryRun, true, printer)
 }
+
+// openWithoutLock opens the repository without creating a lock. In contrast to
+// passing dryRun to the other helpers, the repository stays writable. This
+// allows writing to write-once (WORM) storage that forbids deleting files,
+// where removing the lock file again would fail.
+func openWithoutLock(ctx context.Context, gopts global.Options, printer progress.Printer) (context.Context, *repository.Repository, func(), error) {
+	repo, err := global.OpenRepository(ctx, gopts, printer)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return ctx, repo, func() {}, nil
+}
